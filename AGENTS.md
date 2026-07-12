@@ -100,6 +100,10 @@ Key options (mirrors MIPster's `configster`, adapted for 5 independent projects)
 | `--arch=native\|generic\|<preset>` | `native` | Target CPU: `native` (`-march/-mtune=native`), `generic` (no arch flags), or a named milestone preset (see below) |
 | `--march-native` / `--no-march-native` | — | Legacy aliases for `--arch=native` / `--arch=generic` |
 | `--avx2` / `--no-avx2` | off | `-DCOIN_AVX2=4` hand-written SIMD (x86_64 only, independent of `--arch`) |
+| `--lapack` / `--no-lapack` | on if found | LAPACK/BLAS (prefers OpenBLAS when available) — CoinUtils |
+| `--zlib` / `--no-zlib` | on if found | `.gz` compressed MPS/LP file I/O — CoinUtils |
+| `--bz2` / `--no-bz2` | on if found | `.bz2` compressed MPS/LP file I/O — CoinUtils |
+| `--nauty` / `--no-nauty` | on if found | Graph automorphism for symmetry cuts — Cbc |
 | `--static` / `--shared` / `--both` | `--static` | Library type |
 | `--prefix=PATH` | `~/prog/cbc` | Shared install prefix for all 5 projects |
 | `--jobs=N` | `nproc` | Parallel make jobs (used for every project) |
@@ -136,6 +140,29 @@ matching `configster`'s `derive_prefix` convention.
 > **Note:** NEON hand-written SIMD support was evaluated and dropped — it showed
 > no measurable speedup, so `config` (unlike `configster`) does not offer a
 > `--neon` option. AVX2 is still offered since it is useful on x86_64.
+
+### Optional dependencies (LAPACK/OpenBLAS, zlib, bz2, Nauty)
+
+`config` auto-detects these optional libraries and only exposes toggles for the
+ones actually found on the system (undetected ones aren't shown at all, since
+there's nothing to toggle). Detection is **Homebrew-aware**: if the compiler
+that will be used for the build (`$CC`, falling back to `cc`) resolves to a
+path inside a Homebrew prefix, Homebrew's copy of each library is preferred
+over the system one (when installed); otherwise the system's libraries are
+used, matching plain autoconf auto-detection. This mirrors — but is stricter
+than — `configster`'s Homebrew-preference logic, which always prefers Homebrew
+regardless of which compiler is selected.
+
+- **LAPACK/OpenBLAS** (CoinUtils): OpenBLAS is preferred over a bare reference
+  LAPACK/BLAS when found, since it's a faster drop-in replacement.
+- **zlib / bz2** (CoinUtils): enable reading/writing compressed `.gz`/`.bz2`
+  MPS/LP files.
+- **Nauty** (Cbc): graph automorphism library used for symmetry-detection cuts.
+
+In the interactive TUI, these appear as a checklist step (debug/opt- and
+arch-independent) right after the AVX2 prompt, defaulting to "on" for whatever
+was detected. In plain-text mode, the fallback is one y/N prompt per
+detected dependency.
 
 ### Incremental rebuilds — `build`
 

@@ -44,6 +44,15 @@
 #     --avx2                   -DCOIN_AVX2=4 (x86_64 only)   [default: OFF]
 #     --no-avx2                Omit -DCOIN_AVX2=4 (default)
 #
+#   Optional dependencies (only shown/usable when detected on the system):
+#     --lapack / --no-lapack    LAPACK/BLAS (prefers OpenBLAS)     [default: on if found]
+#     --zlib / --no-zlib        .gz compressed MPS/LP I/O          [default: on if found]
+#     --bz2 / --no-bz2          .bz2 compressed MPS/LP I/O         [default: on if found]
+#     --nauty / --no-nauty      Graph automorphism (Cbc symmetry)  [default: on if found]
+#
+#     Detection prefers Homebrew libraries when the selected compiler is
+#     itself a Homebrew compiler; otherwise system libraries are used.
+#
 #   Library type:
 #     --static                 Static libs only               [default]
 #     --shared                 Shared libs only
@@ -110,6 +119,14 @@ OPT_BUILD_MODE="opt"       # opt | debug
 OPT_SANITIZER="none"       # none | asan | tsan | valgrind
 OPT_ARCH="native"          # generic | native | <named preset, see _arch_choices>
 OPT_AVX2=0                 # 1=on 0=off  (only applies on x86_64; adds -DCOIN_AVX2=4)
+
+# Optional dependencies. -1 = "unset" (use detected availability as default);
+# explicitly set to 0/1 once the user (CLI flag or TUI) has made a choice.
+OPT_LAPACK=-1
+OPT_ZLIB=-1
+OPT_BZ2=-1
+OPT_NAUTY=-1
+
 OPT_LIB_TYPE="static"      # static | shared | both
 OPT_PREFIX=""              # auto-derived if empty
 OPT_JOBS="$NPROC"
@@ -138,6 +155,14 @@ parse_args() {
       --no-march-native)   OPT_ARCH="generic" ;;
       --avx2)              OPT_AVX2=1 ;;
       --no-avx2)           OPT_AVX2=0 ;;
+      --lapack)            OPT_LAPACK=1 ;;
+      --no-lapack)         OPT_LAPACK=0 ;;
+      --zlib)              OPT_ZLIB=1 ;;
+      --no-zlib)           OPT_ZLIB=0 ;;
+      --bz2)               OPT_BZ2=1 ;;
+      --no-bz2)            OPT_BZ2=0 ;;
+      --nauty)             OPT_NAUTY=1 ;;
+      --no-nauty)          OPT_NAUTY=0 ;;
       --static)            OPT_LIB_TYPE="static" ;;
       --shared)            OPT_LIB_TYPE="shared" ;;
       --both)              OPT_LIB_TYPE="both"   ;;
@@ -207,6 +232,206 @@ _project_dir() {
   echo "${SRC_DIR}/$1"
 }
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  Optional dependency detection (LAPACK/OpenBLAS, zlib, bz2, Nauty)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+#  Homebrew-aware: when the compiler resolved for this build lives under a
+#  Homebrew prefix, we prefer Homebrew's copy of each optional library (if
+#  installed) over the system copy, so the whole toolchain is consistent.
+#  Otherwise the system's libraries/headers are used, same as plain autoconf
+#  auto-detection.
+
+BREW_PREFIX=""
+USE_BREW_LIBS=0
+
+LAPACK_AVAIL=0; LAPACK_LFLAGS=""; LAPACK_WHAT=""
+ZLIB_AVAIL=0;   ZLIB_CFLAGS="";   ZLIB_LFLAGS=""
+BZ2_AVAIL=0;    BZ2_CFLAGS="";    BZ2_LFLAGS=""
+NAUTY_AVAIL=0;  NAUTY_CFLAGS="";  NAUTY_LFLAGS=""
+
+_pkgcfg() {
+  command -v pkg-config &>/dev/null || return 1
+  local pcpath="$1" flag="$2" pkg="$3"
+  PKG_CONFIG_PATH="${pcpath}${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}" \
+    pkg-config "$flag" "$pkg" 2>/dev/null
+}
+
+# Try to compile a 1-line program including $1, with extra flags $2.. .
+_check_header() {
+  local header="$1"; shift
+  echo "#include <${header}>
+int main(void){return 0;}" | "${CC:-cc}" "$@" -x c - -o /dev/null 2>/dev/null
+  local rc=$?
+  rm -f a.out 2>/dev/null
+  return $rc
+}
+
+detect_optional_deps() {
+  # ── Locate Homebrew (same probing order as the compiler search below) ─────
+  if command -v brew &>/dev/null; then
+    BREW_PREFIX="$(brew --prefix 2>/dev/null || true)"
+  else
+    local _bp
+    for _bp in /home/linuxbrew/.linuxbrew /opt/homebrew /usr/local; do
+      [[ -x "${_bp}/bin/brew" ]] && { BREW_PREFIX="$_bp"; break; }
+    done
+  fi
+
+  # ── Is the compiler we will actually use a Homebrew compiler? ─────────────
+  if [[ -n "$BREW_PREFIX" ]]; then
+    local _cc_path
+    _cc_path="$(command -v "${CC:-cc}" 2>/dev/null || true)"
+    [[ "$_cc_path" == "${BREW_PREFIX}"/* ]] && USE_BREW_LIBS=1
+  fi
+
+  # ── LAPACK / OpenBLAS ──────────────────────────────────────────────────────
+  # OpenBLAS is a faster drop-in that also provides LAPACK; prefer it over a
+  # bare reference LAPACK/BLAS when found. Homebrew ships it as "openblas"
+  # (not under the generic lapack.pc/blas.pc names autoconf looks for), so we
+  # always pass explicit --with-lapack-lflags when using it.
+  if (( USE_BREW_LIBS )) && [[ -d "${BREW_PREFIX}/opt/openblas" ]]; then
+    LAPACK_AVAIL=1
+    LAPACK_LFLAGS="$(_pkgcfg "${BREW_PREFIX}/opt/openblas/lib/pkgconfig" --libs openblas)"
+    LAPACK_WHAT="Homebrew OpenBLAS"
+  elif _pkgcfg "" --exists openblas && _pkgcfg "" --libs openblas &>/dev/null; then
+    LAPACK_AVAIL=1
+    LAPACK_LFLAGS="$(_pkgcfg "" --libs openblas)"
+    LAPACK_WHAT="system OpenBLAS"
+  elif _pkgcfg "" --exists "lapack blas" 2>/dev/null; then
+    LAPACK_AVAIL=1
+    LAPACK_WHAT="system LAPACK/BLAS"
+    # No explicit lflags needed — CoinUtils' own configure auto-probes
+    # lapack.pc/blas.pc via pkg-config.
+  elif ldconfig -p 2>/dev/null | grep -q 'liblapack\.so'; then
+    LAPACK_AVAIL=1
+    LAPACK_WHAT="system LAPACK/BLAS"
+  fi
+
+  # ── zlib (.gz support) ─────────────────────────────────────────────────────
+  if (( USE_BREW_LIBS )) && [[ -d "${BREW_PREFIX}/opt/zlib" ]]; then
+    ZLIB_AVAIL=1
+    ZLIB_CFLAGS="-I${BREW_PREFIX}/opt/zlib/include"
+    ZLIB_LFLAGS="-L${BREW_PREFIX}/opt/zlib/lib"
+  elif _check_header zlib.h; then
+    ZLIB_AVAIL=1
+  elif [[ -n "$BREW_PREFIX" && -d "${BREW_PREFIX}/opt/zlib" ]]; then
+    ZLIB_AVAIL=1
+    ZLIB_CFLAGS="-I${BREW_PREFIX}/opt/zlib/include"
+    ZLIB_LFLAGS="-L${BREW_PREFIX}/opt/zlib/lib"
+  fi
+
+  # ── bzip2 (.bz2 support) ────────────────────────────────────────────────────
+  if (( USE_BREW_LIBS )) && [[ -d "${BREW_PREFIX}/opt/bzip2" ]]; then
+    BZ2_AVAIL=1
+    BZ2_CFLAGS="-I${BREW_PREFIX}/opt/bzip2/include"
+    BZ2_LFLAGS="-L${BREW_PREFIX}/opt/bzip2/lib"
+  elif _check_header bzlib.h; then
+    BZ2_AVAIL=1
+  elif [[ -n "$BREW_PREFIX" && -d "${BREW_PREFIX}/opt/bzip2" ]]; then
+    BZ2_AVAIL=1
+    BZ2_CFLAGS="-I${BREW_PREFIX}/opt/bzip2/include"
+    BZ2_LFLAGS="-L${BREW_PREFIX}/opt/bzip2/lib"
+  fi
+
+  # ── Nauty (graph automorphism, used by Cbc for symmetry detection) ────────
+  # Cbc's configure auto-probes a "nauty" pkg-config module, so if we can
+  # find one (system or Homebrew) no explicit flags are required. Otherwise
+  # fall back to a plain header/lib check and pass explicit flags.
+  if (( USE_BREW_LIBS )) && [[ -n "$BREW_PREFIX" ]] && _pkgcfg "${BREW_PREFIX}/lib/pkgconfig:${BREW_PREFIX}/opt/nauty/lib/pkgconfig" --exists nauty 2>/dev/null; then
+    NAUTY_AVAIL=1
+    NAUTY_CFLAGS="$(_pkgcfg "${BREW_PREFIX}/lib/pkgconfig:${BREW_PREFIX}/opt/nauty/lib/pkgconfig" --cflags nauty)"
+    NAUTY_LFLAGS="$(_pkgcfg "${BREW_PREFIX}/lib/pkgconfig:${BREW_PREFIX}/opt/nauty/lib/pkgconfig" --libs nauty)"
+  elif _pkgcfg "" --exists nauty 2>/dev/null; then
+    NAUTY_AVAIL=1
+  elif (( USE_BREW_LIBS )) && [[ -n "$BREW_PREFIX" && -d "${BREW_PREFIX}/opt/nauty" ]]; then
+    NAUTY_AVAIL=1
+    NAUTY_CFLAGS="-I${BREW_PREFIX}/opt/nauty/include"
+    NAUTY_LFLAGS="-L${BREW_PREFIX}/opt/nauty/lib -lnauty"
+  elif _check_header nauty/nauty.h; then
+    NAUTY_AVAIL=1
+    NAUTY_LFLAGS="-lnauty"
+  elif [[ -n "$BREW_PREFIX" && -d "${BREW_PREFIX}/opt/nauty" ]]; then
+    NAUTY_AVAIL=1
+    NAUTY_CFLAGS="-I${BREW_PREFIX}/opt/nauty/include"
+    NAUTY_LFLAGS="-L${BREW_PREFIX}/opt/nauty/lib -lnauty"
+  fi
+
+  # ── Resolve "unset" (-1) CLI/default state to the detected availability ───
+  # A user-forced --lapack/--no-lapack (etc.) always wins; if never touched,
+  # default to "on" when available, "off" when not found at all.
+  [[ "$OPT_LAPACK" == "-1" ]] && OPT_LAPACK=$LAPACK_AVAIL
+  [[ "$OPT_ZLIB"   == "-1" ]] && OPT_ZLIB=$ZLIB_AVAIL
+  [[ "$OPT_BZ2"    == "-1" ]] && OPT_BZ2=$BZ2_AVAIL
+  [[ "$OPT_NAUTY"  == "-1" ]] && OPT_NAUTY=$NAUTY_AVAIL
+
+  # A dependency explicitly requested on but not actually available cannot be
+  # honoured — fall back to off with a warning rather than fail later deep
+  # inside `configure`.
+  if (( OPT_LAPACK && ! LAPACK_AVAIL )); then
+    echo "${YELLOW}Warning: LAPACK/OpenBLAS not found — disabling.${RESET}" >&2
+    OPT_LAPACK=0
+  fi
+  if (( OPT_ZLIB && ! ZLIB_AVAIL )); then
+    echo "${YELLOW}Warning: zlib not found — disabling.${RESET}" >&2
+    OPT_ZLIB=0
+  fi
+  if (( OPT_BZ2 && ! BZ2_AVAIL )); then
+    echo "${YELLOW}Warning: bzip2 not found — disabling.${RESET}" >&2
+    OPT_BZ2=0
+  fi
+  if (( OPT_NAUTY && ! NAUTY_AVAIL )); then
+    echo "${YELLOW}Warning: Nauty not found — disabling.${RESET}" >&2
+    OPT_NAUTY=0
+  fi
+}
+
+# One-line human-readable summary of optional-dependency choices, e.g.
+# "LAPACK:on zlib:on bz2:off" — omits deps that were never detected at all.
+_deps_label() {
+  local parts=()
+  (( LAPACK_AVAIL )) && parts+=("LAPACK:$( (( OPT_LAPACK )) && echo on || echo off )")
+  (( ZLIB_AVAIL ))   && parts+=("zlib:$( (( OPT_ZLIB ))   && echo on || echo off )")
+  (( BZ2_AVAIL ))    && parts+=("bz2:$( (( OPT_BZ2 ))    && echo on || echo off )")
+  (( NAUTY_AVAIL ))  && parts+=("nauty:$( (( OPT_NAUTY ))  && echo on || echo off )")
+  if [[ ${#parts[@]} -eq 0 ]]; then
+    echo "none detected"
+  else
+    echo "${parts[*]}"
+  fi
+}
+
+# Per-project extra configure options driven by optional-dependency choices.
+# Populates the array named _EXTRA_OPTS (CoinUtils carries lapack/zlib/bz2;
+# Cbc carries Nauty — the other projects have no optional deps of their own).
+_project_extra_opts() {
+  local project="$1"
+  _EXTRA_OPTS=()
+  case "$project" in
+    CoinUtils)
+      if (( OPT_LAPACK )); then
+        [[ -n "$LAPACK_LFLAGS" ]] && _EXTRA_OPTS+=("--with-lapack-lflags=${LAPACK_LFLAGS}")
+      else
+        _EXTRA_OPTS+=("--without-lapack")
+      fi
+      if (( ! OPT_ZLIB )); then
+        _EXTRA_OPTS+=("--disable-zlib")
+      fi
+      if (( ! OPT_BZ2 )); then
+        _EXTRA_OPTS+=("--disable-bzlib")
+      fi
+      ;;
+    Cbc)
+      if (( OPT_NAUTY )); then
+        [[ -n "$NAUTY_CFLAGS" ]] && _EXTRA_OPTS+=("--with-nauty-cflags=${NAUTY_CFLAGS}")
+        [[ -n "$NAUTY_LFLAGS" ]] && _EXTRA_OPTS+=("--with-nauty-lflags=${NAUTY_LFLAGS}")
+      else
+        _EXTRA_OPTS+=("--without-nauty")
+      fi
+      ;;
+  esac
+}
+
 # ── Compiler / flag assembly ─────────────────────────────────────────────────
 FINAL_CXXFLAGS=""
 FINAL_CFLAGS=""
@@ -248,6 +473,17 @@ build_flags() {
 
   if (( OPT_AVX2 )); then
     cflags+=" -DCOIN_AVX2=4"
+  fi
+
+  # Homebrew keg-only zlib/bzip2 need explicit -I/-L (only set when detection
+  # had to fall back to a Homebrew opt/ path rather than the system default).
+  if (( OPT_ZLIB )) && [[ -n "$ZLIB_CFLAGS" ]]; then
+    cflags+=" $ZLIB_CFLAGS"
+    ldflags+=" $ZLIB_LFLAGS"
+  fi
+  if (( OPT_BZ2 )) && [[ -n "$BZ2_CFLAGS" ]]; then
+    cflags+=" $BZ2_CFLAGS"
+    ldflags+=" $BZ2_LFLAGS"
   fi
 
   FINAL_CFLAGS="$cflags"
@@ -350,7 +586,43 @@ run_tui() {
     fi
   fi
 
-  # ── 5. Library type ───────────────────────────────────────────────────────
+  # ── 5. Optional dependencies (checklist; only detected ones are shown) ────
+  local dep_items=()
+  (( LAPACK_AVAIL )) && dep_items+=("lapack" "LAPACK/BLAS  (${LAPACK_WHAT:-detected}; dense factorisations)" \
+                                     "$( (( OPT_LAPACK )) && echo on || echo off )")
+  (( ZLIB_AVAIL ))   && dep_items+=("zlib"   "zlib   (.gz compressed MPS/LP file I/O)" \
+                                     "$( (( OPT_ZLIB ))   && echo on || echo off )")
+  (( BZ2_AVAIL ))    && dep_items+=("bz2"    "bzip2  (.bz2 compressed MPS/LP file I/O)" \
+                                     "$( (( OPT_BZ2 ))    && echo on || echo off )")
+  (( NAUTY_AVAIL ))  && dep_items+=("nauty"  "Nauty  (graph automorphism; Cbc symmetry cuts)" \
+                                     "$( (( OPT_NAUTY ))  && echo on || echo off )")
+
+  if [[ ${#dep_items[@]} -gt 0 ]]; then
+    local n_deps=$(( ${#dep_items[@]} / 3 ))
+    local dep_h=$(( n_deps + 8 ))
+    _dlg --backtitle "$BT" \
+         --title "  Optional Dependencies  " \
+         --checklist $'\nToggle detected optional libraries (Space = toggle, Enter = confirm):\n' \
+         "$dep_h" 72 "$n_deps" "${dep_items[@]}" \
+      || { echo "${YELLOW}Cancelled.${RESET}"; exit 0; }
+    local dep_selected="$(_strip_quotes "$REPLY")"
+
+    (( LAPACK_AVAIL )) && OPT_LAPACK=0
+    (( ZLIB_AVAIL ))   && OPT_ZLIB=0
+    (( BZ2_AVAIL ))    && OPT_BZ2=0
+    (( NAUTY_AVAIL ))  && OPT_NAUTY=0
+    local tok
+    for tok in $dep_selected; do
+      case "$tok" in
+        lapack) OPT_LAPACK=1 ;;
+        zlib)   OPT_ZLIB=1   ;;
+        bz2)    OPT_BZ2=1    ;;
+        nauty)  OPT_NAUTY=1  ;;
+      esac
+    done
+  fi
+
+  # ── 6. Library type ───────────────────────────────────────────────────────
   _dlg --backtitle "$BT" \
        --title "  Library Type  " \
        --radiolist $'\nSelect which library types to build:\n' 12 60 3 \
@@ -360,7 +632,7 @@ run_tui() {
     || { echo "${YELLOW}Cancelled.${RESET}"; exit 0; }
   OPT_LIB_TYPE="$(_strip_quotes "$REPLY")"
 
-  # ── 5. Install prefix ─────────────────────────────────────────────────────
+  # ── 7. Install prefix ─────────────────────────────────────────────────────
   derive_prefix   # populate default before asking
   _dlg --backtitle "$BT" \
        --title "  Install Prefix  " \
@@ -368,14 +640,14 @@ run_tui() {
     || { echo "${YELLOW}Cancelled.${RESET}"; exit 0; }
   OPT_PREFIX="${REPLY/#\~/$HOME}"
 
-  # ── 6. Parallel jobs ──────────────────────────────────────────────────────
+  # ── 8. Parallel jobs ──────────────────────────────────────────────────────
   _dlg --backtitle "$BT" \
        --title "  Parallel Jobs  " \
        --inputbox $'\nNumber of parallel make jobs (per project):\n' 9 40 "$OPT_JOBS" \
     || { echo "${YELLOW}Cancelled.${RESET}"; exit 0; }
   OPT_JOBS="$REPLY"
 
-  # ── 7. Post-configure actions ─────────────────────────────────────────────
+  # ── 9. Post-configure actions ─────────────────────────────────────────────
   if "$DIALOG_BIN" --backtitle "$BT" \
        --title "  Post-Configure  " \
        --yesno $'\nRun build automatically after configure?\n' 8 54 \
@@ -402,6 +674,7 @@ run_tui() {
     "Sanitiser:"     "$san_lbl" \
     "Target arch:"   "$OPT_ARCH" \
     "AVX2 (SIMD):"   "$avx2_lbl" \
+    "Opt. deps:"     "$(_deps_label)" \
     "Library type:"  "$OPT_LIB_TYPE" \
     "Install prefix:" "$OPT_PREFIX" \
     "Jobs:"          "$OPT_JOBS" \
@@ -438,6 +711,23 @@ run_tui_plain() {
   if [[ "$ARCH" == "x86_64" ]]; then
     read -rp "  Enable -DCOIN_AVX2=4 hand-written SIMD? [y/N]: " yn
     [[ "${yn,,}" == "y" ]] && OPT_AVX2=1
+  fi
+
+  if (( LAPACK_AVAIL )); then
+    read -rp "  Use LAPACK/BLAS (${LAPACK_WHAT:-detected})? [Y/n]: " yn
+    [[ "${yn,,}" == "n" ]] && OPT_LAPACK=0 || OPT_LAPACK=1
+  fi
+  if (( ZLIB_AVAIL )); then
+    read -rp "  Enable zlib (.gz compressed file I/O)? [Y/n]: " yn
+    [[ "${yn,,}" == "n" ]] && OPT_ZLIB=0 || OPT_ZLIB=1
+  fi
+  if (( BZ2_AVAIL )); then
+    read -rp "  Enable bzip2 (.bz2 compressed file I/O)? [Y/n]: " yn
+    [[ "${yn,,}" == "n" ]] && OPT_BZ2=0 || OPT_BZ2=1
+  fi
+  if (( NAUTY_AVAIL )); then
+    read -rp "  Enable Nauty (graph automorphism, Cbc symmetry cuts)? [Y/n]: " yn
+    [[ "${yn,,}" == "n" ]] && OPT_NAUTY=0 || OPT_NAUTY=1
   fi
 
   read -rp "  Library type [static/shared/both] (default: static): " yn
@@ -499,6 +789,11 @@ _print_cmdline() {
   args+=("--arch=${OPT_ARCH}")
   [[ "$ARCH" == "x86_64" ]] && { (( OPT_AVX2 )) && args+=("--avx2") || args+=("--no-avx2"); }
 
+  (( LAPACK_AVAIL )) && { (( OPT_LAPACK )) && args+=("--lapack") || args+=("--no-lapack"); }
+  (( ZLIB_AVAIL ))   && { (( OPT_ZLIB )) && args+=("--zlib") || args+=("--no-zlib"); }
+  (( BZ2_AVAIL ))    && { (( OPT_BZ2 )) && args+=("--bz2") || args+=("--no-bz2"); }
+  (( NAUTY_AVAIL ))  && { (( OPT_NAUTY )) && args+=("--nauty") || args+=("--no-nauty"); }
+
   args+=("--${OPT_LIB_TYPE}")
   args+=("--prefix=${OPT_PREFIX}")
   args+=("--jobs=${OPT_JOBS}")
@@ -538,6 +833,7 @@ _print_summary() {
     "Sanitiser:"       "$san_lbl" \
     "Target arch:"     "$OPT_ARCH" \
     "AVX2 (SIMD):"     "$avx2_lbl" \
+    "Opt. deps:"       "$(_deps_label)" \
     "Library type:"    "$OPT_LIB_TYPE" \
     "Install prefix:"  "$OPT_PREFIX" \
     "Parallel jobs:"   "$OPT_JOBS" \
@@ -654,6 +950,9 @@ run_configure() {
       _step "$project" "Configure+Build+Install"
       printf "        ${DIM}▸ configuring ...${RESET}"
 
+      local _EXTRA_OPTS
+      _project_extra_opts "$project"
+
       if (( OPT_DRY_RUN )); then
         echo "  ${DIM}[dry-run]${RESET}"
       else
@@ -663,7 +962,7 @@ run_configure() {
         (
           cd "$dir"
           ADD_CXXFLAGS="$FINAL_CXXFLAGS" CFLAGS="$FINAL_CFLAGS" LDFLAGS="$FINAL_LDFLAGS" \
-            ./configure --prefix="$OPT_PREFIX" "${CONFIGURE_OPTS[@]}"
+            ./configure --prefix="$OPT_PREFIX" "${CONFIGURE_OPTS[@]}" "${_EXTRA_OPTS[@]}"
         ) >"$tmplog" 2>&1 || rc=$?
         if (( rc )); then
           echo ""
@@ -707,16 +1006,18 @@ run_configure() {
       continue
     fi
     _step "$project" "Configuring"
+    local _EXTRA_OPTS
+    _project_extra_opts "$project"
     if (( OPT_DRY_RUN )); then
       echo "    ${DIM}[dry-run] ADD_CXXFLAGS='${FINAL_CXXFLAGS}' LDFLAGS='${FINAL_LDFLAGS}' \\"
-      echo "              ./configure --prefix=${OPT_PREFIX} ${CONFIGURE_OPTS[*]}${RESET}"
+      echo "              ./configure --prefix=${OPT_PREFIX} ${CONFIGURE_OPTS[*]} ${_EXTRA_OPTS[*]}${RESET}"
       _ok; continue
     fi
     local rc=0
     (
       cd "$dir"
       ADD_CXXFLAGS="$FINAL_CXXFLAGS" CFLAGS="$FINAL_CFLAGS" LDFLAGS="$FINAL_LDFLAGS" \
-        ./configure --prefix="$OPT_PREFIX" "${CONFIGURE_OPTS[@]}"
+        ./configure --prefix="$OPT_PREFIX" "${CONFIGURE_OPTS[@]}" "${_EXTRA_OPTS[@]}"
     ) || rc=$?
     if (( rc )); then
       _fail
@@ -738,6 +1039,7 @@ main() {
 
   validate_opts
   derive_prefix
+  detect_optional_deps
 
   # Launch TUI when: no args given at all, or --interactive was passed
   if (( ! _ARGS_GIVEN )) || (( OPT_INTERACTIVE )); then
