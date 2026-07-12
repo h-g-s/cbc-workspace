@@ -28,6 +28,8 @@
 #   Compiler optimisations:
 #     --march-native           -march=native -mtune=native   [default: ON]
 #     --no-march-native        Disable arch-specific opts
+#     --avx2                   -DCOIN_AVX2=4 (x86_64 only)   [default: OFF]
+#     --no-avx2                Omit -DCOIN_AVX2=4 (default)
 #
 #   Library type:
 #     --static                 Static libs only               [default]
@@ -35,7 +37,7 @@
 #     --both                   Both static and shared
 #
 #   Install / build:
-#     --prefix=PATH             Install prefix   [default: ~/prog/cbc-ws]
+#     --prefix=PATH             Install prefix   [default: ~/prog/cbc]
 #     --jobs=N                  Parallel make jobs for every project [default: nproc]
 #     --build                   Configure + build (no install)
 #     --install                 Configure + build + install
@@ -68,6 +70,7 @@ fi
 OPT_BUILD_MODE="opt"       # opt | debug
 OPT_SANITIZER="none"       # none | asan | tsan | valgrind
 OPT_MARCH_NATIVE=1         # 1=on 0=off
+OPT_AVX2=0                 # 1=on 0=off  (only applies on x86_64; adds -DCOIN_AVX2=4)
 OPT_LIB_TYPE="static"      # static | shared | both
 OPT_PREFIX=""              # auto-derived if empty
 OPT_JOBS="$NPROC"
@@ -93,6 +96,8 @@ parse_args() {
       --sanitizer=*)       OPT_SANITIZER="${arg#--sanitizer=}" ;;
       --march-native)      OPT_MARCH_NATIVE=1 ;;
       --no-march-native)   OPT_MARCH_NATIVE=0 ;;
+      --avx2)              OPT_AVX2=1 ;;
+      --no-avx2)           OPT_AVX2=0 ;;
       --static)            OPT_LIB_TYPE="static" ;;
       --shared)            OPT_LIB_TYPE="shared" ;;
       --both)              OPT_LIB_TYPE="both"   ;;
@@ -126,12 +131,16 @@ validate_opts() {
   if [[ ! "$OPT_JOBS" =~ ^[1-9][0-9]*$ ]]; then
     echo "${RED}Invalid jobs value '${OPT_JOBS}'. Must be a positive integer.${RESET}" >&2; exit 1
   fi
+  # AVX2 is x86_64-only — silently disable on other arches.
+  # Use || form (not &&) so the expression always returns 0, avoiding a set -e
+  # exit when the condition is false and the assignment is short-circuited.
+  [[ "$ARCH" == "x86_64"  ]] || OPT_AVX2=0
 }
 
 # ── Derive install prefix if not set by user ──────────────────────────────────
 derive_prefix() {
   [[ -n "$OPT_PREFIX" ]] && return
-  local base="${CBC_WORKSPACE_PREFIX:-$HOME/prog/cbc-ws}"
+  local base="${CBC_WORKSPACE_PREFIX:-$HOME/prog/cbc}"
   case "$OPT_SANITIZER" in
     asan)     OPT_PREFIX="${base}-asan"  ;;
     tsan)     OPT_PREFIX="${base}-tsan" ;;
@@ -179,7 +188,12 @@ build_flags() {
 
   if (( OPT_MARCH_NATIVE )); then
     cflags+=" -march=native -mtune=native"
-    [[ "$ARCH" == "aarch64" ]] && cflags+=" -ffp-contract=off"
+    [[ "$ARCH" == "x86_64" ]] && cflags+=" -ffp-contract=off"
+  fi
+  [[ "$ARCH" == "aarch64" ]] && cflags+=" -ffp-contract=off"
+
+  if (( OPT_AVX2 )); then
+    cflags+=" -DCOIN_AVX2=4"
   fi
 
   FINAL_CFLAGS="$cflags"
@@ -255,18 +269,31 @@ run_tui() {
   fi
 
   # ── 3. Compiler feature flags (checklist) ────────────────────────────────
+  local cl_items=()
+  cl_items+=("march" "-march=native  -mtune=native  -ffp-contract=off" "on")
+  [[ "$ARCH" == "x86_64" ]]  && \
+  cl_items+=("avx2"  "-DCOIN_AVX2=4  hand-written SIMD  (x86_64)"       "off")
+
+  local cl_args=()
+  local i
+  for (( i=0; i<${#cl_items[@]}; i+=3 )); do
+    cl_args+=("${cl_items[i]}" "${cl_items[i+1]}" "${cl_items[i+2]}")
+  done
+  local n_items=$(( ${#cl_items[@]} / 3 ))
+  local dlg_h=$(( n_items + 8 ))
+
   _dlg --backtitle "$BT" \
        --title "  Compiler Flags  " \
        --checklist $'\nToggle features (Space = toggle, Enter = confirm):\n' \
-       10 66 1 \
-       "march" "-march=native  -mtune=native" "on" \
+       "$dlg_h" 70 "$n_items" "${cl_args[@]}" \
     || { echo "${YELLOW}Cancelled.${RESET}"; exit 0; }
   local selected="$(_strip_quotes "$REPLY")"
 
-  OPT_MARCH_NATIVE=0
+  OPT_MARCH_NATIVE=0; OPT_AVX2=0
   for tok in $selected; do
     case "$tok" in
       march) OPT_MARCH_NATIVE=1 ;;
+      avx2)  OPT_AVX2=1 ;;
     esac
   done
 
@@ -312,6 +339,8 @@ run_tui() {
   # ── Summary ───────────────────────────────────────────────────────────────
   local san_lbl="$OPT_SANITIZER"
   [[ "$OPT_BUILD_MODE" == "opt" && "$OPT_SANITIZER" == "none" ]] && san_lbl="n/a"
+  local avx2_lbl="n/a (aarch64)"
+  [[ "$ARCH" == "x86_64" ]] && avx2_lbl="$( (( OPT_AVX2 )) && echo yes || echo no )"
 
   local summary
   summary=$(printf "%-18s %s\n" \
@@ -319,6 +348,7 @@ run_tui() {
     "Build mode:"    "$OPT_BUILD_MODE" \
     "Sanitiser:"     "$san_lbl" \
     "march-native:"  "$( (( OPT_MARCH_NATIVE )) && echo yes || echo no )" \
+    "AVX2 (SIMD):"   "$avx2_lbl" \
     "Library type:"  "$OPT_LIB_TYPE" \
     "Install prefix:" "$OPT_PREFIX" \
     "Jobs:"          "$OPT_JOBS" \
@@ -327,7 +357,7 @@ run_tui() {
 
   "$DIALOG_BIN" --backtitle "$BT" \
     --title "  Configuration Summary  " \
-    --yesno "$(printf '\n%s\n\nProceed?' "$summary")" 18 66 \
+    --yesno "$(printf '\n%s\n\nProceed?' "$summary")" 20 66 \
     2>/dev/null >/dev/tty \
     || { echo "${YELLOW}Aborted by user.${RESET}"; exit 0; }
 }
@@ -351,6 +381,11 @@ run_tui_plain() {
 
   read -rp "  Enable -march=native / -mtune=native? [Y/n]: " yn
   [[ "${yn,,}" == "n" ]] && OPT_MARCH_NATIVE=0
+
+  if [[ "$ARCH" == "x86_64" ]]; then
+    read -rp "  Enable -DCOIN_AVX2=4 hand-written SIMD? [y/N]: " yn
+    [[ "${yn,,}" == "y" ]] && OPT_AVX2=1
+  fi
 
   read -rp "  Library type [static/shared/both] (default: static): " yn
   [[ -n "$yn" ]] && OPT_LIB_TYPE="$yn"
@@ -409,6 +444,7 @@ _print_cmdline() {
   fi
 
   (( OPT_MARCH_NATIVE )) && args+=("--march-native") || args+=("--no-march-native")
+  [[ "$ARCH" == "x86_64" ]] && { (( OPT_AVX2 )) && args+=("--avx2") || args+=("--no-avx2"); }
 
   args+=("--${OPT_LIB_TYPE}")
   args+=("--prefix=${OPT_PREFIX}")
@@ -438,6 +474,8 @@ _print_cmdline() {
 _print_summary() {
   local san_lbl="$OPT_SANITIZER"
   [[ "$OPT_BUILD_MODE" == "opt" && "$OPT_SANITIZER" == "none" ]] && san_lbl="n/a"
+  local avx2_lbl="n/a (aarch64)"
+  [[ "$ARCH" == "x86_64" ]] && avx2_lbl="$( (( OPT_AVX2 )) && echo on || echo off )"
 
   _section "Configuration"
   printf "  ${BOLD}%-22s${RESET}${CYAN}%s${RESET}\n" \
@@ -446,6 +484,7 @@ _print_summary() {
     "Build mode:"      "$OPT_BUILD_MODE" \
     "Sanitiser:"       "$san_lbl" \
     "march-native:"    "$( (( OPT_MARCH_NATIVE )) && echo on || echo off )" \
+    "AVX2 (SIMD):"     "$avx2_lbl" \
     "Library type:"    "$OPT_LIB_TYPE" \
     "Install prefix:"  "$OPT_PREFIX" \
     "Parallel jobs:"   "$OPT_JOBS" \

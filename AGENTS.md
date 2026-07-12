@@ -82,7 +82,10 @@ the full CoinUtils → Osi → Clp → Cgl → Cbc stack into one shared prefix.
 ./conf_wiz --opt
 
 # Custom prefix, jobs, shared libs:
-./conf_wiz --opt --install --prefix=/opt/cbc-ws --jobs=8 --shared
+./conf_wiz --opt --install --prefix=/opt/cbc --jobs=8 --shared
+
+# Enable AVX2 hand-written SIMD paths (x86_64 only):
+./conf_wiz --opt --avx2 --install
 ```
 
 Key options (mirrors MIPster's `configster`, adapted for 5 independent projects):
@@ -92,8 +95,9 @@ Key options (mirrors MIPster's `configster`, adapted for 5 independent projects)
 | `--opt` / `--debug` | `--opt` | Build mode |
 | `--sanitizer=none\|asan\|tsan\|valgrind` | `none` | Sanitizer (debug only) |
 | `--march-native` / `--no-march-native` | on | `-march=native -mtune=native` |
+| `--avx2` / `--no-avx2` | off | `-DCOIN_AVX2=4` hand-written SIMD (x86_64 only) |
 | `--static` / `--shared` / `--both` | `--static` | Library type |
-| `--prefix=PATH` | `~/prog/cbc-ws` | Shared install prefix for all 5 projects |
+| `--prefix=PATH` | `~/prog/cbc` | Shared install prefix for all 5 projects |
 | `--jobs=N` | `nproc` | Parallel make jobs (used for every project) |
 | `--install` | off | Build + install after configure |
 | `--dry-run` | off | Show commands without running |
@@ -109,8 +113,13 @@ it skips the interactive prompts and goes straight to configuring
 > `$PREFIX/lib/pkgconfig` before the next project's `configure` runs, since
 > dependency discovery is pkg-config based (`AC_COIN_CHK_PKG` in each `configure.ac`).
 
-Debug builds install to `$PREFIX-dbg` (ASan) and `$PREFIX-tsan` (TSan), matching
-MIPster convention.
+Debug builds install to a suffixed prefix based on sanitizer: `$PREFIX-asan`,
+`$PREFIX-tsan`, `$PREFIX-vg` (valgrind), or plain `$PREFIX-dbg` (no sanitizer),
+matching `configster`'s `derive_prefix` convention.
+
+> **Note:** NEON hand-written SIMD support was evaluated and dropped — it showed
+> no measurable speedup, so `conf_wiz` (unlike `configster`) does not offer a
+> `--neon` option. AVX2 is still offered since it is useful on x86_64.
 
 ### Incremental rebuilds — `build.sh`
 
