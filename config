@@ -1018,7 +1018,7 @@ run_configure() {
         (
           cd "$dir"
           ADD_CXXFLAGS="$FINAL_CXXFLAGS" CFLAGS="$FINAL_CFLAGS" LDFLAGS="$FINAL_LDFLAGS" \
-            ./configure --prefix="$OPT_PREFIX" "${CONFIGURE_OPTS[@]}" "${_EXTRA_OPTS[@]}"
+            ./configure --prefix="$OPT_PREFIX" "${CONFIGURE_OPTS[@]}" ${_EXTRA_OPTS[@]+"${_EXTRA_OPTS[@]}"}
         ) >"$tmplog" 2>&1 || rc=$?
         if (( rc )); then
           echo ""
@@ -1066,14 +1066,14 @@ run_configure() {
     _project_extra_opts "$project"
     if (( OPT_DRY_RUN )); then
       echo "    ${DIM}[dry-run] ADD_CXXFLAGS='${FINAL_CXXFLAGS}' LDFLAGS='${FINAL_LDFLAGS}' \\"
-      echo "              ./configure --prefix=${OPT_PREFIX} ${CONFIGURE_OPTS[*]} ${_EXTRA_OPTS[*]}${RESET}"
+      echo "              ./configure --prefix=${OPT_PREFIX} ${CONFIGURE_OPTS[*]} ${_EXTRA_OPTS[*]+${_EXTRA_OPTS[*]}}${RESET}"
       _ok; continue
     fi
     local rc=0
     (
       cd "$dir"
       ADD_CXXFLAGS="$FINAL_CXXFLAGS" CFLAGS="$FINAL_CFLAGS" LDFLAGS="$FINAL_LDFLAGS" \
-        ./configure --prefix="$OPT_PREFIX" "${CONFIGURE_OPTS[@]}" "${_EXTRA_OPTS[@]}"
+        ./configure --prefix="$OPT_PREFIX" "${CONFIGURE_OPTS[@]}" ${_EXTRA_OPTS[@]+"${_EXTRA_OPTS[@]}"}
     ) || rc=$?
     if (( rc )); then
       _fail
