@@ -86,6 +86,9 @@ the full CoinUtils → Osi → Clp → Cgl → Cbc stack into one shared prefix.
 
 # Enable AVX2 hand-written SIMD paths (x86_64 only):
 ./conf_wiz --opt --avx2 --install
+
+# Target a specific CPU generation (haswell = AVX2+FMA+BMI2, 2013):
+./conf_wiz --opt --arch=haswell --avx2 --install
 ```
 
 Key options (mirrors MIPster's `configster`, adapted for 5 independent projects):
@@ -94,18 +97,31 @@ Key options (mirrors MIPster's `configster`, adapted for 5 independent projects)
 |---|---|---|
 | `--opt` / `--debug` | `--opt` | Build mode |
 | `--sanitizer=none\|asan\|tsan\|valgrind` | `none` | Sanitizer (debug only) |
-| `--march-native` / `--no-march-native` | on | `-march=native -mtune=native` |
-| `--avx2` / `--no-avx2` | off | `-DCOIN_AVX2=4` hand-written SIMD (x86_64 only) |
+| `--arch=native\|generic\|<preset>` | `native` | Target CPU: `native` (`-march/-mtune=native`), `generic` (no arch flags), or a named milestone preset (see below) |
+| `--march-native` / `--no-march-native` | — | Legacy aliases for `--arch=native` / `--arch=generic` |
+| `--avx2` / `--no-avx2` | off | `-DCOIN_AVX2=4` hand-written SIMD (x86_64 only, independent of `--arch`) |
 | `--static` / `--shared` / `--both` | `--static` | Library type |
 | `--prefix=PATH` | `~/prog/cbc` | Shared install prefix for all 5 projects |
 | `--jobs=N` | `nproc` | Parallel make jobs (used for every project) |
 | `--install` | off | Build + install after configure |
 | `--dry-run` | off | Show commands without running |
 
+`--arch` presets (3 milestones per architecture, besides `native`/`generic`):
+
+| Architecture | Presets |
+|---|---|
+| x86_64 | `sandybridge` (AVX, 2011) · `haswell` (AVX2+FMA+BMI2, 2013) · `skylake-avx512` (AVX-512, 2017) |
+| aarch64 | `cortex-a72` (ARMv8.0, e.g. Raspberry Pi 4) · `neoverse-n1` (ARMv8.2, e.g. AWS Graviton2) · `neoverse-v1` (ARMv8.4+SVE, e.g. AWS Graviton3) |
+
+> **`-ffp-contract=off` is always added**, regardless of `--arch`, for reproducible
+> floating-point results (no silent FMA contraction across build modes or CPU
+> generations). This is a deliberate difference from `configster`, which only adds
+> it conditionally.
+
 **Behaviour:** with **no arguments**, `conf_wiz` enters interactive mode by default
-(prompts for build mode, sanitizer, prefix, jobs, library type). **With any argument**,
-it skips the interactive prompts and goes straight to configuring
-(and building/installing if `--install`/`--build` is given).
+(prompts for build mode, sanitizer, target arch, AVX2, prefix, jobs, library type).
+**With any argument**, it skips the interactive prompts and goes straight to
+configuring (and building/installing if `--install`/`--build` is given).
 
 > **Important:** `conf_wiz` always processes the 5 projects **in dependency order**
 > and, when `--install` is given, interleaves configure → build → install **per

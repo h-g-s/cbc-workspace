@@ -26,8 +26,21 @@
 #     --sanitizer=valgrind     Valgrind-friendly (no ASan/TSan, keeps frame ptrs)
 #
 #   Compiler optimisations:
-#     --march-native           -march=native -mtune=native   [default: ON]
-#     --no-march-native        Disable arch-specific opts
+#     --arch=native            -march=native -mtune=native            [default]
+#     --arch=generic           No -march/-mtune (compiler default baseline)
+#     --arch=<preset>          A named milestone preset (see below)
+#     --march-native           Alias for --arch=native  (legacy)
+#     --no-march-native        Alias for --arch=generic (legacy)
+#
+#     x86_64 presets   : sandybridge (AVX, 2011) | haswell (AVX2+FMA, 2013)
+#                        | skylake-avx512 (AVX-512, 2017)
+#     aarch64 presets  : cortex-a72 (ARMv8.0, e.g. RPi4)
+#                        | neoverse-n1 (ARMv8.2, e.g. AWS Graviton2)
+#                        | neoverse-v1 (ARMv8.4+SVE, e.g. AWS Graviton3)
+#
+#     -ffp-contract=off is ALWAYS added (any --arch value) for reproducible,
+#     stable floating-point results (no silent FMA contraction).
+#
 #     --avx2                   -DCOIN_AVX2=4 (x86_64 only)   [default: OFF]
 #     --no-avx2                Omit -DCOIN_AVX2=4 (default)
 #
@@ -56,6 +69,32 @@ ARCH="$(uname -m)"
 NPROC="$(nproc 2>/dev/null || echo 4)"
 PROJECTS=(CoinUtils Osi Clp Cgl Cbc)
 
+# ── Architecture target presets ──────────────────────────────────────────────
+# Besides "native" and "generic" (no arch flags), offer 3 named milestones per
+# architecture. These are real -march values recognised by GCC/Clang, chosen
+# to reflect meaningful hardware generations rather than abstract ISA levels.
+_arch_choices() {
+  case "$ARCH" in
+    x86_64)  echo "sandybridge haswell skylake-avx512" ;;
+    aarch64) echo "cortex-a72 neoverse-n1 neoverse-v1" ;;
+    *) : ;;
+  esac
+}
+
+_arch_label() {
+  case "$1" in
+    native)          echo "Native  (-march=native -mtune=native, tuned for this CPU)" ;;
+    generic)         echo "Generic  (no -march/-mtune, compiler baseline)" ;;
+    sandybridge)     echo "Sandy Bridge  (AVX, 2011)" ;;
+    haswell)         echo "Haswell  (AVX2 + FMA + BMI2, 2013)" ;;
+    skylake-avx512)  echo "Skylake-X  (AVX-512, 2017)" ;;
+    cortex-a72)      echo "Cortex-A72  (ARMv8.0, e.g. Raspberry Pi 4)" ;;
+    neoverse-n1)     echo "Neoverse N1  (ARMv8.2, e.g. AWS Graviton2)" ;;
+    neoverse-v1)     echo "Neoverse V1  (ARMv8.4 + SVE, e.g. AWS Graviton3)" ;;
+    *)               echo "$1" ;;
+  esac
+}
+
 # ── ANSI colours (auto-disabled when not a terminal) ─────────────────────────
 if [[ -t 1 ]]; then
   BOLD=$'\e[1m';  RESET=$'\e[0m';   DIM=$'\e[2m'
@@ -69,7 +108,7 @@ fi
 # ── Defaults ─────────────────────────────────────────────────────────────────
 OPT_BUILD_MODE="opt"       # opt | debug
 OPT_SANITIZER="none"       # none | asan | tsan | valgrind
-OPT_MARCH_NATIVE=1         # 1=on 0=off
+OPT_ARCH="native"          # generic | native | <named preset, see _arch_choices>
 OPT_AVX2=0                 # 1=on 0=off  (only applies on x86_64; adds -DCOIN_AVX2=4)
 OPT_LIB_TYPE="static"      # static | shared | both
 OPT_PREFIX=""              # auto-derived if empty
@@ -94,8 +133,9 @@ parse_args() {
       --opt)               OPT_BUILD_MODE="opt"  ;;
       --debug)             OPT_BUILD_MODE="debug" ;;
       --sanitizer=*)       OPT_SANITIZER="${arg#--sanitizer=}" ;;
-      --march-native)      OPT_MARCH_NATIVE=1 ;;
-      --no-march-native)   OPT_MARCH_NATIVE=0 ;;
+      --arch=*)            OPT_ARCH="${arg#--arch=}" ;;
+      --march-native)      OPT_ARCH="native" ;;
+      --no-march-native)   OPT_ARCH="generic" ;;
       --avx2)              OPT_AVX2=1 ;;
       --no-avx2)           OPT_AVX2=0 ;;
       --static)            OPT_LIB_TYPE="static" ;;
@@ -131,6 +171,15 @@ validate_opts() {
   if [[ ! "$OPT_JOBS" =~ ^[1-9][0-9]*$ ]]; then
     echo "${RED}Invalid jobs value '${OPT_JOBS}'. Must be a positive integer.${RESET}" >&2; exit 1
   fi
+  case "$OPT_ARCH" in
+    native|generic) ;;
+    *)
+      if ! [[ " $(_arch_choices) " == *" ${OPT_ARCH} "* ]]; then
+        echo "${RED}Invalid --arch '${OPT_ARCH}' for ${ARCH}. Use: native generic $(_arch_choices)${RESET}" >&2
+        exit 1
+      fi
+      ;;
+  esac
   # AVX2 is x86_64-only — silently disable on other arches.
   # Use || form (not &&) so the expression always returns 0, avoiding a set -e
   # exit when the condition is false and the assignment is short-circuited.
@@ -186,11 +235,16 @@ build_flags() {
     esac
   fi
 
-  if (( OPT_MARCH_NATIVE )); then
-    cflags+=" -march=native -mtune=native"
-    [[ "$ARCH" == "x86_64" ]] && cflags+=" -ffp-contract=off"
-  fi
-  [[ "$ARCH" == "aarch64" ]] && cflags+=" -ffp-contract=off"
+  case "$OPT_ARCH" in
+    generic) : ;;
+    native)  cflags+=" -march=native -mtune=native" ;;
+    *)       cflags+=" -march=${OPT_ARCH} -mtune=${OPT_ARCH}" ;;
+  esac
+
+  # -ffp-contract=off is ALWAYS added, regardless of --arch, for reproducible
+  # and stable floating-point results (no silent FMA contraction that could
+  # change rounding behaviour between debug/opt or across CPU generations).
+  cflags+=" -ffp-contract=off"
 
   if (( OPT_AVX2 )); then
     cflags+=" -DCOIN_AVX2=4"
@@ -268,36 +322,35 @@ run_tui() {
     OPT_SANITIZER="$(_strip_quotes "$REPLY")"
   fi
 
-  # ── 3. Compiler feature flags (checklist) ────────────────────────────────
-  local cl_items=()
-  cl_items+=("march" "-march=native  -mtune=native  -ffp-contract=off" "on")
-  [[ "$ARCH" == "x86_64" ]]  && \
-  cl_items+=("avx2"  "-DCOIN_AVX2=4  hand-written SIMD  (x86_64)"       "off")
-
-  local cl_args=()
-  local i
-  for (( i=0; i<${#cl_items[@]}; i+=3 )); do
-    cl_args+=("${cl_items[i]}" "${cl_items[i+1]}" "${cl_items[i+2]}")
+  # ── 3. Target architecture (single choice) ────────────────────────────────
+  local arch_args=("native" "$(_arch_label native)" ON \
+                    "generic" "$(_arch_label generic)" OFF)
+  local preset
+  for preset in $(_arch_choices); do
+    arch_args+=("$preset" "$(_arch_label "$preset")" OFF)
   done
-  local n_items=$(( ${#cl_items[@]} / 3 ))
-  local dlg_h=$(( n_items + 8 ))
+  local n_arch=$(( ${#arch_args[@]} / 3 ))
+  local arch_h=$(( n_arch + 8 ))
 
   _dlg --backtitle "$BT" \
-       --title "  Compiler Flags  " \
-       --checklist $'\nToggle features (Space = toggle, Enter = confirm):\n' \
-       "$dlg_h" 70 "$n_items" "${cl_args[@]}" \
+       --title "  Target Architecture  " \
+       --radiolist $'\nSelect the CPU generation to compile for (always adds -ffp-contract=off):\n' \
+       "$arch_h" 74 "$n_arch" "${arch_args[@]}" \
     || { echo "${YELLOW}Cancelled.${RESET}"; exit 0; }
-  local selected="$(_strip_quotes "$REPLY")"
+  OPT_ARCH="$(_strip_quotes "$REPLY")"
 
-  OPT_MARCH_NATIVE=0; OPT_AVX2=0
-  for tok in $selected; do
-    case "$tok" in
-      march) OPT_MARCH_NATIVE=1 ;;
-      avx2)  OPT_AVX2=1 ;;
-    esac
-  done
+  # ── 4. AVX2 hand-written SIMD (x86_64 only) ───────────────────────────────
+  OPT_AVX2=0
+  if [[ "$ARCH" == "x86_64" ]]; then
+    if "$DIALOG_BIN" --backtitle "$BT" \
+         --title "  AVX2 hand-written SIMD  " \
+         --yesno $'\nEnable -DCOIN_AVX2=4 (hand-written SIMD in ClpSimplexDual)?\n' 8 66 \
+         2>/dev/null >/dev/tty; then
+      OPT_AVX2=1
+    fi
+  fi
 
-  # ── 4. Library type ───────────────────────────────────────────────────────
+  # ── 5. Library type ───────────────────────────────────────────────────────
   _dlg --backtitle "$BT" \
        --title "  Library Type  " \
        --radiolist $'\nSelect which library types to build:\n' 12 60 3 \
@@ -347,7 +400,7 @@ run_tui() {
     "Projects:"      "${PROJECTS[*]}" \
     "Build mode:"    "$OPT_BUILD_MODE" \
     "Sanitiser:"     "$san_lbl" \
-    "march-native:"  "$( (( OPT_MARCH_NATIVE )) && echo yes || echo no )" \
+    "Target arch:"   "$OPT_ARCH" \
     "AVX2 (SIMD):"   "$avx2_lbl" \
     "Library type:"  "$OPT_LIB_TYPE" \
     "Install prefix:" "$OPT_PREFIX" \
@@ -379,8 +432,8 @@ run_tui_plain() {
     [[ -n "$yn" ]] && OPT_SANITIZER="$yn"
   fi
 
-  read -rp "  Enable -march=native / -mtune=native? [Y/n]: " yn
-  [[ "${yn,,}" == "n" ]] && OPT_MARCH_NATIVE=0
+  read -rp "  Target arch [native/generic/$(_arch_choices | tr ' ' '/')] (default: native): " yn
+  [[ -n "$yn" ]] && OPT_ARCH="$yn"
 
   if [[ "$ARCH" == "x86_64" ]]; then
     read -rp "  Enable -DCOIN_AVX2=4 hand-written SIMD? [y/N]: " yn
@@ -443,7 +496,7 @@ _print_cmdline() {
     args+=("--sanitizer=${OPT_SANITIZER}")
   fi
 
-  (( OPT_MARCH_NATIVE )) && args+=("--march-native") || args+=("--no-march-native")
+  args+=("--arch=${OPT_ARCH}")
   [[ "$ARCH" == "x86_64" ]] && { (( OPT_AVX2 )) && args+=("--avx2") || args+=("--no-avx2"); }
 
   args+=("--${OPT_LIB_TYPE}")
@@ -479,11 +532,11 @@ _print_summary() {
 
   _section "Configuration"
   printf "  ${BOLD}%-22s${RESET}${CYAN}%s${RESET}\n" \
-    "Architecture:"    "$ARCH" \
+    "Host arch:"       "$ARCH" \
     "Projects:"        "${PROJECTS[*]}" \
     "Build mode:"      "$OPT_BUILD_MODE" \
     "Sanitiser:"       "$san_lbl" \
-    "march-native:"    "$( (( OPT_MARCH_NATIVE )) && echo on || echo off )" \
+    "Target arch:"     "$OPT_ARCH" \
     "AVX2 (SIMD):"     "$avx2_lbl" \
     "Library type:"    "$OPT_LIB_TYPE" \
     "Install prefix:"  "$OPT_PREFIX" \
