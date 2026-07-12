@@ -56,7 +56,7 @@ echo "=== build (jobs=$JOBS, install=$DO_INSTALL, force=$FORCE) ==="
 # ---- compute current state (commit + dirty flag) per submodule ------------
 declare -A CUR_STATE
 for repo in "${REPOS[@]}"; do
-  dir="$WORKSPACE_ROOT/src/$repo"
+  dir="$WORKSPACE_ROOT/$repo"
   if [[ ! -d "$dir/.git" ]]; then
     echo "warning: $dir is not a git checkout (submodule not initialized?) — skipping" >&2
     continue
@@ -117,7 +117,7 @@ echo
 # ---- build in order ---------------------------------------------------------
 for repo in "${REPOS[@]}"; do
   [[ -z "${TO_BUILD[$repo]:-}" ]] && continue
-  dir="$WORKSPACE_ROOT/src/$repo"
+  dir="$WORKSPACE_ROOT/$repo"
   [[ -d "$dir" ]] || continue
 
   echo "=== [$repo] make clean ==="

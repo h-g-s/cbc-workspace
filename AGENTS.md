@@ -14,11 +14,11 @@ wired in here as a **git submodule**:
 
 | Submodule path | Upstream repo | Role |
 |---|---|---|
-| `src/CoinUtils` | `coin-or/CoinUtils` | Utility types/data structures (base layer, no COIN-OR deps) |
-| `src/Osi` | `coin-or/Osi` | Abstract LP/MIP solver interface (depends on CoinUtils) |
-| `src/Clp` | `coin-or/Clp` | Simplex LP solver + `OsiClp` (depends on CoinUtils, Osi) |
-| `src/Cgl` | `coin-or/Cgl` | Cut generators (depends on CoinUtils, Osi, Clp) |
-| `src/Cbc` | `coin-or/Cbc` | Branch-and-cut MIP solver (depends on all of the above) |
+| `CoinUtils` | `coin-or/CoinUtils` | Utility types/data structures (base layer, no COIN-OR deps) |
+| `Osi` | `coin-or/Osi` | Abstract LP/MIP solver interface (depends on CoinUtils) |
+| `Clp` | `coin-or/Clp` | Simplex LP solver + `OsiClp` (depends on CoinUtils, Osi) |
+| `Cgl` | `coin-or/Cgl` | Cut generators (depends on CoinUtils, Osi, Clp) |
+| `Cbc` | `coin-or/Cbc` | Branch-and-cut MIP solver (depends on all of the above) |
 
 **Dependency / build order (strict):** `CoinUtils → Osi → Clp → Cgl → Cbc`.
 Each project is configured/built/installed into a **shared prefix**; later projects
@@ -39,7 +39,7 @@ official upstream repo, and each submodule is checked out on `next` by default
 
 Before starting work in any submodule:
 ```sh
-cd src/<Project>
+cd <Project>
 git checkout next
 git pull origin next
 ```
@@ -47,14 +47,14 @@ git pull origin next
 When your change is ready, push directly to `next` on the official repo (or open a
 PR against `next` if project policy requires review):
 ```sh
-cd src/<Project>
+cd <Project>
 git push origin next
 ```
 
 After updating a submodule's `next` branch, update the superproject's pointer too:
 ```sh
 cd cbc-workspace
-git add src/<Project>
+git add <Project>
 git commit -m "Bump <Project> to latest next"
 ```
 
@@ -166,7 +166,7 @@ day-to-day incremental builds:
 > | `Cgl` | `Cbc` |
 > | `Cbc` | *(itself only)* |
 >
-> Never hand-roll a partial rebuild (e.g. `cd src/Cbc && make`) after touching
+> Never hand-roll a partial rebuild (e.g. `cd Cbc && make`) after touching
 > `CoinUtils`/`Osi`/`Clp`/`Cgl` — use `build`, or you will silently test against
 > stale dependency libraries.
 
@@ -186,7 +186,7 @@ Exploit all cores of the machine. Every script in this workspace (`config`,
 Each project has its own test suite (`make check` / `test/` directory, depending on
 the project). Run tests for a project after building it:
 ```sh
-cd src/Cbc/test && make -j$(nproc) && make test
+cd Cbc/test && make -j$(nproc) && make test
 ```
 Prefer testing the specific project(s) whose code changed rather than the whole
 stack, unless the change is in a lower layer (`CoinUtils`, `Osi`, `Clp`) that could
