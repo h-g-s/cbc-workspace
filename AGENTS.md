@@ -101,6 +101,7 @@ Key options (mirrors MIPster's `configster`, adapted for 5 independent projects)
 | `--march-native` / `--no-march-native` | — | Legacy aliases for `--arch=native` / `--arch=generic` |
 | `--avx2` / `--no-avx2` | off | `-DCOIN_AVX2=4` hand-written SIMD (x86_64 only, independent of `--arch`) |
 | `--lapack` / `--no-lapack` | on if found | LAPACK/BLAS (prefers OpenBLAS when available) — CoinUtils |
+| `--amd` / `--no-amd` | on if found | SuiteSparse AMD ordering (Clp dense/CHOLMOD Cholesky) — Clp |
 | `--zlib` / `--no-zlib` | on if found | `.gz` compressed MPS/LP file I/O — CoinUtils |
 | `--bz2` / `--no-bz2` | on if found | `.bz2` compressed MPS/LP file I/O — CoinUtils |
 | `--nauty` / `--no-nauty` | on if found | Graph automorphism for symmetry cuts — Cbc |
@@ -141,7 +142,7 @@ matching `configster`'s `derive_prefix` convention.
 > no measurable speedup, so `config` (unlike `configster`) does not offer a
 > `--neon` option. AVX2 is still offered since it is useful on x86_64.
 
-### Optional dependencies (LAPACK/OpenBLAS, zlib, bz2, Nauty)
+### Optional dependencies (LAPACK/OpenBLAS, AMD, zlib, bz2, Nauty)
 
 `config` auto-detects these optional libraries and only exposes toggles for the
 ones actually found on the system (undetected ones aren't shown at all, since
@@ -155,6 +156,9 @@ regardless of which compiler is selected.
 
 - **LAPACK/OpenBLAS** (CoinUtils): OpenBLAS is preferred over a bare reference
   LAPACK/BLAS when found, since it's a faster drop-in replacement.
+- **AMD** (Clp): SuiteSparse's Approximate Minimum Degree ordering, used by
+  Clp's dense/CHOLMOD-based Cholesky factorisation. BSD-3-Clause licensed, so
+  it's safe to bundle in redistributed binaries.
 - **zlib / bz2** (CoinUtils): enable reading/writing compressed `.gz`/`.bz2`
   MPS/LP files.
 - **Nauty** (Cbc): graph automorphism library used for symmetry-detection cuts.
@@ -205,7 +209,27 @@ day-to-day incremental builds:
 
 State is tracked in `.build-state` (gitignored) at the workspace root.
 
-## Hardware & Parallelism
+### Packaging relocatable distribution bundles — `package`
+
+After `./config --install`, `./package` turns an installed prefix into a
+self-contained, relocatable tarball (`.tar.gz`, or `.zip` on Windows) suitable
+for CI artifact upload / release distribution:
+
+```sh
+./config --opt --install --prefix=/tmp/cbc-build
+./package --prefix=/tmp/cbc-build --name=cbc-linux-x86_64 --out=dist
+```
+
+It copies the installed `bin/`/`lib/`/`include/`/`share/` tree, then for every
+binary and shared library bundles any non-baseline-OS runtime dependency
+(OpenBLAS, AMD/CHOLMOD, zlib, bz2, Nauty, libgfortran, etc.) alongside it and
+rewrites rpath/RUNPATH (Linux: `patchelf`) or install names (macOS:
+`install_name_tool`) to `$ORIGIN`/`@rpath`-relative paths — so the resulting
+tarball runs on a bare target machine without the build system's `-dev`
+packages installed. On Windows (MSYS2/MinGW) DLL dependencies are copied next
+to the `.exe` instead, since Windows has no rpath concept.
+
+
 
 Exploit all cores of the machine. Every script in this workspace (`config`,
 `build`) defaults its job count to `$(nproc)` and never hardcodes a lower value.

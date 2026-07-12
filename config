@@ -46,6 +46,7 @@
 #
 #   Optional dependencies (only shown/usable when detected on the system):
 #     --lapack / --no-lapack    LAPACK/BLAS (prefers OpenBLAS)     [default: on if found]
+#     --amd / --no-amd          SuiteSparse AMD ordering (Clp Cholesky) [default: on if found]
 #     --zlib / --no-zlib        .gz compressed MPS/LP I/O          [default: on if found]
 #     --bz2 / --no-bz2          .bz2 compressed MPS/LP I/O         [default: on if found]
 #     --nauty / --no-nauty      Graph automorphism (Cbc symmetry)  [default: on if found]
@@ -123,6 +124,7 @@ OPT_AVX2=0                 # 1=on 0=off  (only applies on x86_64; adds -DCOIN_AV
 # Optional dependencies. -1 = "unset" (use detected availability as default);
 # explicitly set to 0/1 once the user (CLI flag or TUI) has made a choice.
 OPT_LAPACK=-1
+OPT_AMD=-1
 OPT_ZLIB=-1
 OPT_BZ2=-1
 OPT_NAUTY=-1
@@ -157,6 +159,8 @@ parse_args() {
       --no-avx2)           OPT_AVX2=0 ;;
       --lapack)            OPT_LAPACK=1 ;;
       --no-lapack)         OPT_LAPACK=0 ;;
+      --amd)               OPT_AMD=1 ;;
+      --no-amd)            OPT_AMD=0 ;;
       --zlib)              OPT_ZLIB=1 ;;
       --no-zlib)           OPT_ZLIB=0 ;;
       --bz2)               OPT_BZ2=1 ;;
@@ -233,7 +237,7 @@ _project_dir() {
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Optional dependency detection (LAPACK/OpenBLAS, zlib, bz2, Nauty)
+#  Optional dependency detection (LAPACK/OpenBLAS, AMD, zlib, bz2, Nauty)
 # ══════════════════════════════════════════════════════════════════════════════
 #
 #  Homebrew-aware: when the compiler resolved for this build lives under a
@@ -246,6 +250,7 @@ BREW_PREFIX=""
 USE_BREW_LIBS=0
 
 LAPACK_AVAIL=0; LAPACK_LFLAGS=""; LAPACK_WHAT=""
+AMD_AVAIL=0;    AMD_CFLAGS="";    AMD_LFLAGS=""
 ZLIB_AVAIL=0;   ZLIB_CFLAGS="";   ZLIB_LFLAGS=""
 BZ2_AVAIL=0;    BZ2_CFLAGS="";    BZ2_LFLAGS=""
 NAUTY_AVAIL=0;  NAUTY_CFLAGS="";  NAUTY_LFLAGS=""
@@ -308,6 +313,33 @@ detect_optional_deps() {
     LAPACK_WHAT="system LAPACK/BLAS"
   fi
 
+  # ── AMD (SuiteSparse approximate minimum degree ordering; used by Clp's
+  #    dense/CHOLMOD-based Cholesky factorisation) ────────────────────────────
+  # pkg-config module name is "AMD" (SuiteSparse convention); Homebrew ships
+  # it bundled in the "suite-sparse" formula rather than a standalone "amd"
+  # formula, still exposing an AMD.pc under its own lib/pkgconfig.
+  if (( USE_BREW_LIBS )) && [[ -n "$BREW_PREFIX" ]] && _pkgcfg "${BREW_PREFIX}/lib/pkgconfig:${BREW_PREFIX}/opt/suite-sparse/lib/pkgconfig" --exists AMD 2>/dev/null; then
+    AMD_AVAIL=1
+    AMD_CFLAGS="$(_pkgcfg "${BREW_PREFIX}/lib/pkgconfig:${BREW_PREFIX}/opt/suite-sparse/lib/pkgconfig" --cflags AMD)"
+    AMD_LFLAGS="$(_pkgcfg "${BREW_PREFIX}/lib/pkgconfig:${BREW_PREFIX}/opt/suite-sparse/lib/pkgconfig" --libs AMD)"
+  elif _pkgcfg "" --exists AMD 2>/dev/null; then
+    AMD_AVAIL=1
+    AMD_CFLAGS="$(_pkgcfg "" --cflags AMD)"
+    AMD_LFLAGS="$(_pkgcfg "" --libs AMD)"
+  elif (( USE_BREW_LIBS )) && [[ -n "$BREW_PREFIX" && -d "${BREW_PREFIX}/opt/suite-sparse" ]]; then
+    AMD_AVAIL=1
+    AMD_CFLAGS="-I${BREW_PREFIX}/opt/suite-sparse/include/suitesparse"
+    AMD_LFLAGS="-L${BREW_PREFIX}/opt/suite-sparse/lib -lamd"
+  elif _check_header suitesparse/amd.h; then
+    AMD_AVAIL=1
+    AMD_CFLAGS="-I/usr/include/suitesparse"
+    AMD_LFLAGS="-lamd"
+  elif [[ -n "$BREW_PREFIX" && -d "${BREW_PREFIX}/opt/suite-sparse" ]]; then
+    AMD_AVAIL=1
+    AMD_CFLAGS="-I${BREW_PREFIX}/opt/suite-sparse/include/suitesparse"
+    AMD_LFLAGS="-L${BREW_PREFIX}/opt/suite-sparse/lib -lamd"
+  fi
+
   # ── zlib (.gz support) ─────────────────────────────────────────────────────
   if (( USE_BREW_LIBS )) && [[ -d "${BREW_PREFIX}/opt/zlib" ]]; then
     ZLIB_AVAIL=1
@@ -361,6 +393,7 @@ detect_optional_deps() {
   # A user-forced --lapack/--no-lapack (etc.) always wins; if never touched,
   # default to "on" when available, "off" when not found at all.
   [[ "$OPT_LAPACK" == "-1" ]] && OPT_LAPACK=$LAPACK_AVAIL
+  [[ "$OPT_AMD"    == "-1" ]] && OPT_AMD=$AMD_AVAIL
   [[ "$OPT_ZLIB"   == "-1" ]] && OPT_ZLIB=$ZLIB_AVAIL
   [[ "$OPT_BZ2"    == "-1" ]] && OPT_BZ2=$BZ2_AVAIL
   [[ "$OPT_NAUTY"  == "-1" ]] && OPT_NAUTY=$NAUTY_AVAIL
@@ -371,6 +404,10 @@ detect_optional_deps() {
   if (( OPT_LAPACK && ! LAPACK_AVAIL )); then
     echo "${YELLOW}Warning: LAPACK/OpenBLAS not found — disabling.${RESET}" >&2
     OPT_LAPACK=0
+  fi
+  if (( OPT_AMD && ! AMD_AVAIL )); then
+    echo "${YELLOW}Warning: SuiteSparse AMD not found — disabling.${RESET}" >&2
+    OPT_AMD=0
   fi
   if (( OPT_ZLIB && ! ZLIB_AVAIL )); then
     echo "${YELLOW}Warning: zlib not found — disabling.${RESET}" >&2
@@ -391,9 +428,10 @@ detect_optional_deps() {
 _deps_label() {
   local parts=()
   (( LAPACK_AVAIL )) && parts+=("LAPACK:$( (( OPT_LAPACK )) && echo on || echo off )")
+  (( AMD_AVAIL ))    && parts+=("AMD:$( (( OPT_AMD ))    && echo on || echo off )")
   (( ZLIB_AVAIL ))   && parts+=("zlib:$( (( OPT_ZLIB ))   && echo on || echo off )")
   (( BZ2_AVAIL ))    && parts+=("bz2:$( (( OPT_BZ2 ))    && echo on || echo off )")
-  (( NAUTY_AVAIL ))  && parts+=("nauty:$( (( OPT_NAUTY ))  && echo on || echo off )")
+  (( NAUTY_AVAIL ))  && parts+=("nauty:$( (( OPT_NAUTY )) && echo on || echo off )")
   if [[ ${#parts[@]} -eq 0 ]]; then
     echo "none detected"
   else
@@ -403,7 +441,8 @@ _deps_label() {
 
 # Per-project extra configure options driven by optional-dependency choices.
 # Populates the array named _EXTRA_OPTS (CoinUtils carries lapack/zlib/bz2;
-# Cbc carries Nauty — the other projects have no optional deps of their own).
+# Clp carries AMD; Cbc carries Nauty — Osi/Cgl have no optional deps of
+# their own).
 _project_extra_opts() {
   local project="$1"
   _EXTRA_OPTS=()
@@ -419,6 +458,14 @@ _project_extra_opts() {
       fi
       if (( ! OPT_BZ2 )); then
         _EXTRA_OPTS+=("--disable-bzlib")
+      fi
+      ;;
+    Clp)
+      if (( OPT_AMD )); then
+        [[ -n "$AMD_CFLAGS" ]] && _EXTRA_OPTS+=("--with-amd-cflags=${AMD_CFLAGS}")
+        [[ -n "$AMD_LFLAGS" ]] && _EXTRA_OPTS+=("--with-amd-lflags=${AMD_LFLAGS}")
+      else
+        _EXTRA_OPTS+=("--without-amd")
       fi
       ;;
     Cbc)
@@ -590,6 +637,8 @@ run_tui() {
   local dep_items=()
   (( LAPACK_AVAIL )) && dep_items+=("lapack" "LAPACK/BLAS  (${LAPACK_WHAT:-detected}; dense factorisations)" \
                                      "$( (( OPT_LAPACK )) && echo on || echo off )")
+  (( AMD_AVAIL ))    && dep_items+=("amd"    "SuiteSparse AMD  (ordering for Clp Cholesky)" \
+                                     "$( (( OPT_AMD ))    && echo on || echo off )")
   (( ZLIB_AVAIL ))   && dep_items+=("zlib"   "zlib   (.gz compressed MPS/LP file I/O)" \
                                      "$( (( OPT_ZLIB ))   && echo on || echo off )")
   (( BZ2_AVAIL ))    && dep_items+=("bz2"    "bzip2  (.bz2 compressed MPS/LP file I/O)" \
@@ -608,6 +657,7 @@ run_tui() {
     local dep_selected="$(_strip_quotes "$REPLY")"
 
     (( LAPACK_AVAIL )) && OPT_LAPACK=0
+    (( AMD_AVAIL ))    && OPT_AMD=0
     (( ZLIB_AVAIL ))   && OPT_ZLIB=0
     (( BZ2_AVAIL ))    && OPT_BZ2=0
     (( NAUTY_AVAIL ))  && OPT_NAUTY=0
@@ -615,6 +665,7 @@ run_tui() {
     for tok in $dep_selected; do
       case "$tok" in
         lapack) OPT_LAPACK=1 ;;
+        amd)    OPT_AMD=1    ;;
         zlib)   OPT_ZLIB=1   ;;
         bz2)    OPT_BZ2=1    ;;
         nauty)  OPT_NAUTY=1  ;;
@@ -717,6 +768,10 @@ run_tui_plain() {
     read -rp "  Use LAPACK/BLAS (${LAPACK_WHAT:-detected})? [Y/n]: " yn
     [[ "${yn,,}" == "n" ]] && OPT_LAPACK=0 || OPT_LAPACK=1
   fi
+  if (( AMD_AVAIL )); then
+    read -rp "  Enable SuiteSparse AMD ordering (Clp Cholesky)? [Y/n]: " yn
+    [[ "${yn,,}" == "n" ]] && OPT_AMD=0 || OPT_AMD=1
+  fi
   if (( ZLIB_AVAIL )); then
     read -rp "  Enable zlib (.gz compressed file I/O)? [Y/n]: " yn
     [[ "${yn,,}" == "n" ]] && OPT_ZLIB=0 || OPT_ZLIB=1
@@ -790,6 +845,7 @@ _print_cmdline() {
   [[ "$ARCH" == "x86_64" ]] && { (( OPT_AVX2 )) && args+=("--avx2") || args+=("--no-avx2"); }
 
   (( LAPACK_AVAIL )) && { (( OPT_LAPACK )) && args+=("--lapack") || args+=("--no-lapack"); }
+  (( AMD_AVAIL ))    && { (( OPT_AMD )) && args+=("--amd") || args+=("--no-amd"); }
   (( ZLIB_AVAIL ))   && { (( OPT_ZLIB )) && args+=("--zlib") || args+=("--no-zlib"); }
   (( BZ2_AVAIL ))    && { (( OPT_BZ2 )) && args+=("--bz2") || args+=("--no-bz2"); }
   (( NAUTY_AVAIL ))  && { (( OPT_NAUTY )) && args+=("--nauty") || args+=("--no-nauty"); }

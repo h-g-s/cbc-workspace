@@ -49,7 +49,7 @@ cd cbc-workspace
 
 `config` also lets you pick the target CPU architecture (`--arch=...`), toggle
 hand-written AVX2 SIMD paths, select which optional dependencies to link
-(LAPACK/OpenBLAS, zlib, bz2, Nauty — auto-detected, Homebrew-aware), and choose
+(LAPACK/OpenBLAS, AMD, zlib, bz2, Nauty — auto-detected, Homebrew-aware), and choose
 static/shared/both library types. Run `./config --help` for the full list of
 flags, or just run `./config` with no arguments for the interactive wizard.
 
