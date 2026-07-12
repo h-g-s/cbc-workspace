@@ -171,8 +171,7 @@ day-to-day incremental builds:
 
 ```sh
 ./build              # rebuild whatever changed (+ dependents), install, use all cores
-./build --no-install  # build only, skip `make install`
-./build --force       # force a full rebuild of all 5 projects regardless of diffs
+./build --force       # force a full rebuild+install of all 5 projects regardless of diffs
 ./build CoinUtils     # rebuild only this project and everything that depends on it
 ```
 
@@ -192,6 +191,13 @@ day-to-day incremental builds:
 > | `Clp` | `Cgl`, `Cbc` |
 > | `Cgl` | `Cbc` |
 > | `Cbc` | *(itself only)* |
+>
+> **Every rebuilt project is always `make install`-ed immediately after `make`**
+> (there is no `--no-install` opt-out). Downstream projects discover their
+> dependencies through the shared prefix's installed headers/libs/`.pc` files,
+> not the in-tree build output — so building-without-installing would leave the
+> *next* project in the same `build` run configured against stale artifacts,
+> silently defeating the whole point of the dependents-rebuild logic above.
 >
 > Never hand-roll a partial rebuild (e.g. `cd Cbc && make`) after touching
 > `CoinUtils`/`Osi`/`Clp`/`Cgl` — use `build`, or you will silently test against

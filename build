@@ -10,10 +10,15 @@
 # detects such changes (git commit + dirty working tree per submodule) and force
 # rebuilds every downstream dependent, in addition to whatever changed directly.
 #
+# Every rebuilt project is also `make install`-ed immediately afterwards — not
+# just built — because downstream projects consume the *installed* headers/
+# libraries (via the shared prefix's include/lib/pkgconfig dirs), not the
+# in-tree build output. Skipping install would leave downstream builds linking
+# against stale installed artifacts even though their own sources are current.
+#
 # Usage:
-#   ./build                # rebuild changed projects + dependents, then install
-#   ./build --no-install   # build only, skip `make install`
-#   ./build --force        # force full rebuild of all 5 projects
+#   ./build                # rebuild changed projects + dependents (each is built AND installed)
+#   ./build --force        # force full rebuild+install of all 5 projects
 #   ./build CoinUtils Clp  # restrict "changed" set to these + their dependents
 set -euo pipefail
 
@@ -33,13 +38,11 @@ declare -A DEPENDENTS=(
   [Cbc]=""
 )
 
-DO_INSTALL=1
 FORCE=0
 EXPLICIT_REPOS=()
 
 for arg in "$@"; do
   case "$arg" in
-    --no-install) DO_INSTALL=0 ;;
     --force) FORCE=1 ;;
     --jobs=*) JOBS="${arg#*=}" ;;
     -h|--help)
@@ -51,13 +54,15 @@ for arg in "$@"; do
   esac
 done
 
-echo "=== build (jobs=$JOBS, install=$DO_INSTALL, force=$FORCE) ==="
+echo "=== build (jobs=$JOBS, force=$FORCE) ==="
 
 # ---- compute current state (commit + dirty flag) per submodule ------------
-declare -A CUR_STATE
+declare -A CUR_STATE=()
 for repo in "${REPOS[@]}"; do
   dir="$WORKSPACE_ROOT/$repo"
-  if [[ ! -d "$dir/.git" ]]; then
+  # Submodules have a .git *file* (gitlink pointing at ../.git/modules/<repo>),
+  # not a .git directory — use -e so initialized submodules aren't skipped.
+  if [[ ! -e "$dir/.git" ]]; then
     echo "warning: $dir is not a git checkout (submodule not initialized?) — skipping" >&2
     continue
   fi
@@ -69,7 +74,7 @@ for repo in "${REPOS[@]}"; do
 done
 
 # ---- load previous state ---------------------------------------------------
-declare -A PREV_STATE
+declare -A PREV_STATE=()
 if [[ -f "$STATE_FILE" ]]; then
   while IFS='=' read -r k v; do
     [[ -z "$k" ]] && continue
@@ -78,7 +83,7 @@ if [[ -f "$STATE_FILE" ]]; then
 fi
 
 # ---- determine directly-changed projects -----------------------------------
-declare -A CHANGED
+declare -A CHANGED=()
 if [[ ${#EXPLICIT_REPOS[@]} -gt 0 ]]; then
   for r in "${EXPLICIT_REPOS[@]}"; do CHANGED[$r]=1; done
 elif [[ $FORCE -eq 1 ]]; then
@@ -94,7 +99,7 @@ fi
 
 # ---- propagate to dependents (force rebuild even though their own source
 # didn't change) ---------------------------------------------------------
-declare -A TO_BUILD
+declare -A TO_BUILD=()
 for repo in "${!CHANGED[@]}"; do
   TO_BUILD[$repo]=1
   for dep in ${DEPENDENTS[$repo]}; do
@@ -126,10 +131,12 @@ for repo in "${REPOS[@]}"; do
   echo "=== [$repo] make -j$JOBS ==="
   make -C "$dir" -j"$JOBS"
 
-  if [[ $DO_INSTALL -eq 1 ]]; then
-    echo "=== [$repo] make install ==="
-    make -C "$dir" install
-  fi
+  # Always install immediately: downstream projects (Osi/Clp/Cgl/Cbc) discover
+  # dependencies via the shared prefix's installed headers/libs/.pc files, not
+  # the in-tree build output, so a built-but-not-installed project would leave
+  # the next project in this same loop configured against stale artifacts.
+  echo "=== [$repo] make install ==="
+  make -C "$dir" install
 done
 
 # ---- persist new state (only for repos actually built successfully) --------
