@@ -647,9 +647,8 @@ main() {
   validate_opts
   derive_prefix
 
-  # Launch TUI when: no args given on a TTY, or --interactive was passed
-  if (( ! _ARGS_GIVEN && $([ -t 0 ] && [ -t 1 ]; echo $?) == 0 )) \
-     || (( OPT_INTERACTIVE )); then
+  # Launch TUI when: no args given at all, or --interactive was passed
+  if (( ! _ARGS_GIVEN )) || (( OPT_INTERACTIVE )); then
     run_tui
     printf '\n\n'   # ensure output starts below TUI dialog residue
   fi
