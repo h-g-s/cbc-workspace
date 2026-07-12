@@ -1,215 +1,674 @@
 #!/usr/bin/env bash
-# conf_wiz — configure/build/install wizard for the cbc-workspace multi-repo stack.
+# ══════════════════════════════════════════════════════════════════════════════
+#  conf_wiz  ─  Unified configure / build / install for cbc-workspace
 #
-# Builds, in strict dependency order, into one shared prefix:
-#   CoinUtils -> Osi -> Clp -> Cgl -> Cbc
+#  Configures, in strict dependency order, the 5-project COIN-OR stack:
+#    CoinUtils -> Osi -> Clp -> Cgl -> Cbc
+#  into one shared install prefix (later projects discover earlier ones via
+#  pkg-config .pc files).
 #
-# With NO arguments: enters an interactive TUI that walks through the options.
-# With ANY argument: skips the interactive prompts and configures directly
-# (and builds/installs too, if --install/--build is given).
+#  Usage (non-interactive):
+#    ./conf_wiz [OPTIONS]
+#
+#  Usage (interactive TUI – run with no arguments on a terminal):
+#    ./conf_wiz
+#    ./conf_wiz --interactive
+#
+#  Options:
+#   Build mode:
+#     --opt                    Optimised build (-O3)          [default]
+#     --debug                  Debug build (-O1 -g)
+#
+#   Sanitiser (debug only):
+#     --sanitizer=none         No sanitiser                   [default]
+#     --sanitizer=asan         AddressSanitizer
+#     --sanitizer=tsan         ThreadSanitizer
+#     --sanitizer=valgrind     Valgrind-friendly (no ASan/TSan, keeps frame ptrs)
+#
+#   Compiler optimisations:
+#     --march-native           -march=native -mtune=native   [default: ON]
+#     --no-march-native        Disable arch-specific opts
+#
+#   Library type:
+#     --static                 Static libs only               [default]
+#     --shared                 Shared libs only
+#     --both                   Both static and shared
+#
+#   Install / build:
+#     --prefix=PATH             Install prefix   [default: ~/prog/cbc-ws]
+#     --jobs=N                  Parallel make jobs for every project [default: nproc]
+#     --build                   Configure + build (no install)
+#     --install                 Configure + build + install
+#     --interactive, -i          Force TUI even when arguments are given
+#     --dry-run                  Print commands without running them
+#     --help, -h                  Show this help
+# ══════════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
-WORKSPACE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPOS=(CoinUtils Osi Clp Cgl Cbc)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
+WORKSPACE_DIR="$SCRIPT_DIR"
+SRC_DIR="$WORKSPACE_DIR/src"
+ARCH="$(uname -m)"
+[[ "$ARCH" == "arm64" ]] && ARCH="aarch64"
+NPROC="$(nproc 2>/dev/null || echo 4)"
+PROJECTS=(CoinUtils Osi Clp Cgl Cbc)
 
-# ---- defaults -----------------------------------------------------------
-MODE="opt"                 # opt | debug
-SANITIZER="none"           # none | asan | tsan | valgrind
-MARCH_NATIVE=1
-LIBTYPE="static"           # static | shared | both
-PREFIX="${CBC_WORKSPACE_PREFIX:-$HOME/prog/cbc-ws}"
-JOBS="$(nproc)"
-DO_INSTALL=0
-DRY_RUN=0
-
-usage() {
-  cat <<EOF
-Usage: ./conf_wiz [options]
-
-With no options, runs an interactive wizard.
-
-Options:
-  --opt                       Optimised build (default)
-  --debug                     Debug build
-  --sanitizer=none|asan|tsan|valgrind   Sanitizer (debug builds only, default: none)
-  --march-native               Enable -march=native -mtune=native (default: on)
-  --no-march-native            Disable -march=native -mtune=native
-  --static                     Build static libs only (default)
-  --shared                     Build shared libs only
-  --both                       Build both static and shared libs
-  --prefix=PATH                Install prefix (default: \$CBC_WORKSPACE_PREFIX or ~/prog/cbc-ws)
-  --jobs=N                     Parallel make jobs for every project (default: nproc = $(nproc))
-  --install                    Build + install after configure (per project, in order)
-  --build                      Alias for --install
-  --dry-run                    Print commands without running them
-  -h, --help                    Show this help
-EOF
-}
-
-# ---- arg parsing ----------------------------------------------------------
-INTERACTIVE=1
-if [[ $# -gt 0 ]]; then
-  INTERACTIVE=0
+# ── ANSI colours (auto-disabled when not a terminal) ─────────────────────────
+if [[ -t 1 ]]; then
+  BOLD=$'\e[1m';  RESET=$'\e[0m';   DIM=$'\e[2m'
+  RED=$'\e[31m';  GREEN=$'\e[32m';  YELLOW=$'\e[33m'
+  CYAN=$'\e[36m'; MAGENTA=$'\e[35m'; BLUE=$'\e[34m'
+else
+  BOLD=''; RESET=''; DIM=''; RED=''; GREEN=''
+  YELLOW=''; CYAN=''; MAGENTA=''; BLUE=''
 fi
 
-for arg in "$@"; do
-  case "$arg" in
-    --opt) MODE="opt" ;;
-    --debug) MODE="debug" ;;
-    --sanitizer=*) SANITIZER="${arg#*=}" ;;
-    --march-native) MARCH_NATIVE=1 ;;
-    --no-march-native) MARCH_NATIVE=0 ;;
-    --static) LIBTYPE="static" ;;
-    --shared) LIBTYPE="shared" ;;
-    --both) LIBTYPE="both" ;;
-    --prefix=*) PREFIX="${arg#*=}" ;;
-    --jobs=*) JOBS="${arg#*=}" ;;
-    --install|--build) DO_INSTALL=1 ;;
-    --dry-run) DRY_RUN=1 ;;
-    -h|--help) usage; exit 0 ;;
-    *) echo "Unknown option: $arg" >&2; usage; exit 1 ;;
-  esac
-done
+# ── Defaults ─────────────────────────────────────────────────────────────────
+OPT_BUILD_MODE="opt"       # opt | debug
+OPT_SANITIZER="none"       # none | asan | tsan | valgrind
+OPT_MARCH_NATIVE=1         # 1=on 0=off
+OPT_LIB_TYPE="static"      # static | shared | both
+OPT_PREFIX=""              # auto-derived if empty
+OPT_JOBS="$NPROC"
+OPT_DO_BUILD=0
+OPT_DO_INSTALL=0
+OPT_DRY_RUN=0
+OPT_INTERACTIVE=0
+_ARGS_GIVEN=0              # track whether any CLI args were provided
 
-# ---- interactive wizard ----------------------------------------------------
-ask() {
-  local prompt="$1" default="$2" var
-  read -r -p "$prompt [$default]: " var
-  echo "${var:-$default}"
+# ── Usage ─────────────────────────────────────────────────────────────────────
+usage() {
+  grep '^#  ' "${BASH_SOURCE[0]}" | sed 's/^#  //'
 }
 
-ask_choice() {
-  local prompt="$1" default="$2"; shift 2
-  local choices=("$@")
-  echo "$prompt"
-  select opt in "${choices[@]}"; do
-    if [[ -n "$opt" ]]; then echo "$opt"; return; fi
-    echo "$default"; return
+# ── Parse CLI arguments ───────────────────────────────────────────────────────
+parse_args() {
+  local -a unknown=()
+  for arg in "$@"; do
+    _ARGS_GIVEN=1
+    case "$arg" in
+      --opt)               OPT_BUILD_MODE="opt"  ;;
+      --debug)             OPT_BUILD_MODE="debug" ;;
+      --sanitizer=*)       OPT_SANITIZER="${arg#--sanitizer=}" ;;
+      --march-native)      OPT_MARCH_NATIVE=1 ;;
+      --no-march-native)   OPT_MARCH_NATIVE=0 ;;
+      --static)            OPT_LIB_TYPE="static" ;;
+      --shared)            OPT_LIB_TYPE="shared" ;;
+      --both)              OPT_LIB_TYPE="both"   ;;
+      --prefix=*)          OPT_PREFIX="${arg#--prefix=}" ;;
+      --jobs=*)            OPT_JOBS="${arg#--jobs=}" ;;
+      --build)             OPT_DO_BUILD=1 ;;
+      --install)           OPT_DO_BUILD=1; OPT_DO_INSTALL=1 ;;
+      --interactive|-i)    OPT_INTERACTIVE=1 ;;
+      --dry-run)           OPT_DRY_RUN=1 ;;
+      --help|-h)           usage; exit 0 ;;
+      *) unknown+=("$arg") ;;
+    esac
+  done
+  if [[ ${#unknown[@]} -gt 0 ]]; then
+    echo "${RED}Unknown arguments: ${unknown[*]}${RESET}" >&2
+    echo "Run '$SCRIPT_NAME --help' for usage." >&2
+    exit 1
+  fi
+}
+
+# ── Validation ────────────────────────────────────────────────────────────────
+validate_opts() {
+  case "$OPT_SANITIZER" in
+    none|asan|tsan|valgrind) ;;
+    *) echo "${RED}Invalid sanitizer '${OPT_SANITIZER}'. Use: none asan tsan valgrind${RESET}" >&2; exit 1 ;;
+  esac
+  case "$OPT_LIB_TYPE" in
+    static|shared|both) ;;
+    *) echo "${RED}Invalid library type '${OPT_LIB_TYPE}'. Use: static shared both${RESET}" >&2; exit 1 ;;
+  esac
+  if [[ ! "$OPT_JOBS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "${RED}Invalid jobs value '${OPT_JOBS}'. Must be a positive integer.${RESET}" >&2; exit 1
+  fi
+}
+
+# ── Derive install prefix if not set by user ──────────────────────────────────
+derive_prefix() {
+  [[ -n "$OPT_PREFIX" ]] && return
+  local base="${CBC_WORKSPACE_PREFIX:-$HOME/prog/cbc-ws}"
+  case "$OPT_SANITIZER" in
+    asan)     OPT_PREFIX="${base}-asan"  ;;
+    tsan)     OPT_PREFIX="${base}-tsan" ;;
+    valgrind) OPT_PREFIX="${base}-vg"   ;;
+    *)
+      if [[ "$OPT_BUILD_MODE" == "opt" ]]; then
+        OPT_PREFIX="$base"
+      else
+        OPT_PREFIX="${base}-dbg"
+      fi ;;
+  esac
+}
+
+_project_dir() {
+  echo "${SRC_DIR}/$1"
+}
+
+# ── Compiler / flag assembly ─────────────────────────────────────────────────
+FINAL_CXXFLAGS=""
+FINAL_CFLAGS=""
+FINAL_LDFLAGS=""
+
+build_flags() {
+  local cflags="" ldflags=""
+
+  if [[ "$OPT_BUILD_MODE" == "opt" ]]; then
+    cflags="-O3"
+  else
+    cflags="-O1 -g"
+    case "$OPT_SANITIZER" in
+      asan)
+        cflags+=" -fsanitize=address -fno-omit-frame-pointer"
+        ldflags+=" -fsanitize=address"
+        ;;
+      tsan)
+        cflags+=" -fsanitize=thread -fno-omit-frame-pointer"
+        ldflags+=" -fsanitize=thread"
+        ;;
+      valgrind)
+        cflags+=" -fno-omit-frame-pointer"
+        ;;
+      none) : ;;
+    esac
+  fi
+
+  if (( OPT_MARCH_NATIVE )); then
+    cflags+=" -march=native -mtune=native"
+    [[ "$ARCH" == "aarch64" ]] && cflags+=" -ffp-contract=off"
+  fi
+
+  FINAL_CFLAGS="$cflags"
+  FINAL_CXXFLAGS="$cflags"
+  FINAL_LDFLAGS="$ldflags"
+}
+
+CONFIGURE_OPTS=()
+
+build_configure_opts() {
+  CONFIGURE_OPTS=()
+  case "$OPT_LIB_TYPE" in
+    static) CONFIGURE_OPTS+=("--enable-static" "--disable-shared") ;;
+    shared) CONFIGURE_OPTS+=("--disable-static" "--enable-shared") ;;
+    both)   CONFIGURE_OPTS+=("--enable-static"  "--enable-shared") ;;
+  esac
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  TUI  (dialog-based)
+# ══════════════════════════════════════════════════════════════════════════════
+
+DIALOG_BIN=""
+
+_find_dialog() {
+  if   command -v dialog   &>/dev/null; then DIALOG_BIN="dialog"
+  elif command -v whiptail &>/dev/null; then DIALOG_BIN="whiptail"
+  else
+    echo "${YELLOW}Warning: neither 'dialog' nor 'whiptail' found; " \
+         "falling back to plain prompts.${RESET}" >&2
+    DIALOG_BIN="plain"
+  fi
+}
+
+# Wrapper: captures dialog selection into $REPLY; returns dialog exit code.
+_dlg() {
+  REPLY=$("$DIALOG_BIN" "$@" 2>&1 >/dev/tty)
+}
+
+# Strip surrounding double-quotes that dialog sometimes emits
+_strip_quotes() { echo "${1//\"/}"; }
+
+run_tui() {
+  _find_dialog
+
+  if [[ "$DIALOG_BIN" == "plain" ]]; then
+    run_tui_plain
+    return
+  fi
+
+  local BT="  ◆  cbc-workspace  ─  Build Configurator  ◆"
+
+  # ── 1. Build mode ────────────────────────────────────────────────────────
+  _dlg --backtitle "$BT" \
+       --title "  Build Mode  " \
+       --radiolist $'\nSelect the build mode:\n' 11 54 2 \
+       "opt"   "Optimised  (-O3, release build)"   ON  \
+       "debug" "Debug  (-O1 -g, enable assertions)" OFF \
+    || { echo "${YELLOW}Cancelled.${RESET}"; exit 0; }
+  OPT_BUILD_MODE="$(_strip_quotes "$REPLY")"
+
+  # ── 2. Sanitiser (debug only) ────────────────────────────────────────────
+  if [[ "$OPT_BUILD_MODE" == "debug" ]]; then
+    _dlg --backtitle "$BT" \
+         --title "  Runtime Sanitiser  " \
+         --radiolist $'\nSelect runtime instrumentation:\n' 12 62 3 \
+         "none"     "None  (plain debug build)"               ON  \
+         "asan"     "AddressSanitizer  (memory errors)"       OFF \
+         "tsan"     "ThreadSanitizer  (data races)"           OFF \
+         "valgrind" "Valgrind-friendly  (no sanitiser, full frames)" OFF \
+      || { echo "${YELLOW}Cancelled.${RESET}"; exit 0; }
+    OPT_SANITIZER="$(_strip_quotes "$REPLY")"
+  fi
+
+  # ── 3. Compiler feature flags (checklist) ────────────────────────────────
+  _dlg --backtitle "$BT" \
+       --title "  Compiler Flags  " \
+       --checklist $'\nToggle features (Space = toggle, Enter = confirm):\n' \
+       10 66 1 \
+       "march" "-march=native  -mtune=native" "on" \
+    || { echo "${YELLOW}Cancelled.${RESET}"; exit 0; }
+  local selected="$(_strip_quotes "$REPLY")"
+
+  OPT_MARCH_NATIVE=0
+  for tok in $selected; do
+    case "$tok" in
+      march) OPT_MARCH_NATIVE=1 ;;
+    esac
+  done
+
+  # ── 4. Library type ───────────────────────────────────────────────────────
+  _dlg --backtitle "$BT" \
+       --title "  Library Type  " \
+       --radiolist $'\nSelect which library types to build:\n' 12 60 3 \
+       "static" "Static only   (--enable-static --disable-shared)"  ON  \
+       "shared" "Shared only   (--enable-shared --disable-static)"   OFF \
+       "both"   "Both static and shared"                              OFF \
+    || { echo "${YELLOW}Cancelled.${RESET}"; exit 0; }
+  OPT_LIB_TYPE="$(_strip_quotes "$REPLY")"
+
+  # ── 5. Install prefix ─────────────────────────────────────────────────────
+  derive_prefix   # populate default before asking
+  _dlg --backtitle "$BT" \
+       --title "  Install Prefix  " \
+       --inputbox $'\nInstallation prefix (shared by all 5 projects):\n' 9 64 "$OPT_PREFIX" \
+    || { echo "${YELLOW}Cancelled.${RESET}"; exit 0; }
+  OPT_PREFIX="${REPLY/#\~/$HOME}"
+
+  # ── 6. Parallel jobs ──────────────────────────────────────────────────────
+  _dlg --backtitle "$BT" \
+       --title "  Parallel Jobs  " \
+       --inputbox $'\nNumber of parallel make jobs (per project):\n' 9 40 "$OPT_JOBS" \
+    || { echo "${YELLOW}Cancelled.${RESET}"; exit 0; }
+  OPT_JOBS="$REPLY"
+
+  # ── 7. Post-configure actions ─────────────────────────────────────────────
+  if "$DIALOG_BIN" --backtitle "$BT" \
+       --title "  Post-Configure  " \
+       --yesno $'\nRun build automatically after configure?\n' 8 54 \
+       2>/dev/null >/dev/tty; then
+    OPT_DO_BUILD=1
+    if "$DIALOG_BIN" --backtitle "$BT" \
+         --title "  Post-Build  " \
+         --yesno $'\nRun install automatically after build?\n' 8 54 \
+         2>/dev/null >/dev/tty; then
+      OPT_DO_INSTALL=1
+    fi
+  fi
+
+  # ── Summary ───────────────────────────────────────────────────────────────
+  local san_lbl="$OPT_SANITIZER"
+  [[ "$OPT_BUILD_MODE" == "opt" && "$OPT_SANITIZER" == "none" ]] && san_lbl="n/a"
+
+  local summary
+  summary=$(printf "%-18s %s\n" \
+    "Projects:"      "${PROJECTS[*]}" \
+    "Build mode:"    "$OPT_BUILD_MODE" \
+    "Sanitiser:"     "$san_lbl" \
+    "march-native:"  "$( (( OPT_MARCH_NATIVE )) && echo yes || echo no )" \
+    "Library type:"  "$OPT_LIB_TYPE" \
+    "Install prefix:" "$OPT_PREFIX" \
+    "Jobs:"          "$OPT_JOBS" \
+    "Build after:"   "$( (( OPT_DO_BUILD   )) && echo yes || echo no )" \
+    "Install after:" "$( (( OPT_DO_INSTALL )) && echo yes || echo no )")
+
+  "$DIALOG_BIN" --backtitle "$BT" \
+    --title "  Configuration Summary  " \
+    --yesno "$(printf '\n%s\n\nProceed?' "$summary")" 18 66 \
+    2>/dev/null >/dev/tty \
+    || { echo "${YELLOW}Aborted by user.${RESET}"; exit 0; }
+}
+
+# ── Plain interactive fallback (no dialog) ────────────────────────────────────
+run_tui_plain() {
+  local yn
+  echo ""
+  echo "${BOLD}${CYAN}── cbc-workspace Build Configurator ─────────────────────────${RESET}"
+  echo ""
+  echo "  Projects (in order): ${PROJECTS[*]}"
+  echo ""
+
+  read -rp "  Build mode [opt/debug] (default: opt): " yn
+  [[ -n "$yn" ]] && OPT_BUILD_MODE="$yn"
+
+  if [[ "$OPT_BUILD_MODE" == "debug" ]]; then
+    read -rp "  Sanitiser [none/asan/tsan/valgrind] (default: none): " yn
+    [[ -n "$yn" ]] && OPT_SANITIZER="$yn"
+  fi
+
+  read -rp "  Enable -march=native / -mtune=native? [Y/n]: " yn
+  [[ "${yn,,}" == "n" ]] && OPT_MARCH_NATIVE=0
+
+  read -rp "  Library type [static/shared/both] (default: static): " yn
+  [[ -n "$yn" ]] && OPT_LIB_TYPE="$yn"
+
+  derive_prefix
+  read -rp "  Install prefix (default: $OPT_PREFIX): " yn
+  [[ -n "$yn" ]] && OPT_PREFIX="${yn/#\~/$HOME}"
+
+  read -rp "  Parallel jobs (default: $OPT_JOBS): " yn
+  [[ -n "$yn" ]] && OPT_JOBS="$yn"
+
+  read -rp "  Run build after configure? [y/N]: " yn
+  [[ "${yn,,}" == "y" ]] && OPT_DO_BUILD=1
+
+  if (( OPT_DO_BUILD )); then
+    read -rp "  Run install after build? [y/N]: " yn
+    [[ "${yn,,}" == "y" ]] && OPT_DO_INSTALL=1
+  fi
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Progress & output helpers
+# ══════════════════════════════════════════════════════════════════════════════
+
+_banner() {
+  echo ""
+  echo "${BOLD}${CYAN}╔══════════════════════════════════════════════════════════════╗${RESET}"
+  echo "${BOLD}${CYAN}║       cbc-workspace  ─  Unified Build Configurator            ║${RESET}"
+  echo "${BOLD}${CYAN}╚══════════════════════════════════════════════════════════════╝${RESET}"
+}
+
+_section() {
+  echo ""
+  echo "${BOLD}${BLUE}┌─ $1${RESET}"
+}
+
+_STEP=0; _TOTAL=0
+
+_step() {
+  local project="$1" action="$2"
+  _STEP=$(( _STEP + 1 ))
+  printf "${BOLD}${YELLOW}  [%d/%d] %s: ${MAGENTA}%s${RESET}\n" \
+    "$_STEP" "$_TOTAL" "$action" "$project"
+}
+
+_ok()   { echo "${GREEN}        ✓  done${RESET}"; }
+_fail() { echo "${RED}        ✗  FAILED${RESET}"; }
+
+_print_cmdline() {
+  local args=()
+
+  args+=("--${OPT_BUILD_MODE}")
+
+  if [[ "$OPT_BUILD_MODE" == "debug" && "$OPT_SANITIZER" != "none" ]]; then
+    args+=("--sanitizer=${OPT_SANITIZER}")
+  fi
+
+  (( OPT_MARCH_NATIVE )) && args+=("--march-native") || args+=("--no-march-native")
+
+  args+=("--${OPT_LIB_TYPE}")
+  args+=("--prefix=${OPT_PREFIX}")
+  args+=("--jobs=${OPT_JOBS}")
+
+  if (( OPT_DO_INSTALL )); then
+    args+=("--install")
+  elif (( OPT_DO_BUILD )); then
+    args+=("--build")
+  fi
+  (( OPT_DRY_RUN )) && args+=("--dry-run")
+
+  _section "Equivalent command line"
+  local i last=$(( ${#args[@]} - 1 ))
+  printf "  ${DIM}./$SCRIPT_NAME"
+  for (( i=0; i<${#args[@]}; i++ )); do
+    if (( i == 0 )); then
+      printf " ${CYAN}%s${RESET}" "${args[$i]}"
+    else
+      printf " \\\\\n    ${CYAN}%s${RESET}" "${args[$i]}"
+    fi
+  done
+  echo ""
+  echo ""
+}
+
+_print_summary() {
+  local san_lbl="$OPT_SANITIZER"
+  [[ "$OPT_BUILD_MODE" == "opt" && "$OPT_SANITIZER" == "none" ]] && san_lbl="n/a"
+
+  _section "Configuration"
+  printf "  ${BOLD}%-22s${RESET}${CYAN}%s${RESET}\n" \
+    "Architecture:"    "$ARCH" \
+    "Projects:"        "${PROJECTS[*]}" \
+    "Build mode:"      "$OPT_BUILD_MODE" \
+    "Sanitiser:"       "$san_lbl" \
+    "march-native:"    "$( (( OPT_MARCH_NATIVE )) && echo on || echo off )" \
+    "Library type:"    "$OPT_LIB_TYPE" \
+    "Install prefix:"  "$OPT_PREFIX" \
+    "Parallel jobs:"   "$OPT_JOBS" \
+    "Build after:"     "$( (( OPT_DO_BUILD   )) && echo yes || echo no )" \
+    "Install after:"   "$( (( OPT_DO_INSTALL )) && echo yes || echo no )"
+  echo ""
+  printf "  ${BOLD}%-22s${RESET}${DIM}%s${RESET}\n" \
+    "ADD_CXXFLAGS:" "$FINAL_CXXFLAGS" \
+    "LDFLAGS:"      "${FINAL_LDFLAGS:-(none)}"
+  echo ""
+  _print_cmdline
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Configure / build / install workers
+# ══════════════════════════════════════════════════════════════════════════════
+
+_colorize_make() {
+  while IFS= read -r line; do
+    if [[ "$line" == *": error:"* || "$line" == *": fatal error:"* ]]; then
+      echo "    ${RED}${line}${RESET}"
+    elif [[ "$line" == *": warning:"* ]]; then
+      echo "    ${YELLOW}${line}${RESET}"
+    else
+      echo "    ${DIM}${line}${RESET}"
+    fi
   done
 }
 
-if [[ $INTERACTIVE -eq 1 ]]; then
-  echo "=== conf_wiz — cbc-workspace interactive configuration wizard ==="
-  echo "Projects to configure (in order): ${REPOS[*]}"
-  echo
-
-  mode_choice=$(ask_choice "Build mode:" "opt" "opt" "debug")
-  MODE="$mode_choice"
-
-  if [[ "$MODE" == "debug" ]]; then
-    san_choice=$(ask_choice "Sanitizer:" "none" "none" "asan" "tsan" "valgrind")
-    SANITIZER="$san_choice"
+_build_one() {
+  local project="$1"
+  printf "        ${DIM}▸ building ...${RESET}"
+  if (( OPT_DRY_RUN )); then
+    echo "  ${DIM}[dry-run]${RESET}"; return
   fi
-
-  march_choice=$(ask_choice "Enable -march=native -mtune=native?" "yes" "yes" "no")
-  [[ "$march_choice" == "yes" ]] && MARCH_NATIVE=1 || MARCH_NATIVE=0
-
-  lib_choice=$(ask_choice "Library type:" "static" "static" "shared" "both")
-  LIBTYPE="$lib_choice"
-
-  PREFIX=$(ask "Install prefix" "$PREFIX")
-  JOBS=$(ask "Parallel make jobs" "$JOBS")
-
-  install_choice=$(ask_choice "Build + install after configure?" "yes" "yes" "no")
-  [[ "$install_choice" == "yes" ]] && DO_INSTALL=1 || DO_INSTALL=0
-
-  dry_choice=$(ask_choice "Dry run (print commands only)?" "no" "no" "yes")
-  [[ "$dry_choice" == "yes" ]] && DRY_RUN=1 || DRY_RUN=0
-
-  echo
-fi
-
-# Adjust prefix / sanitizer suffix like configster convention.
-if [[ "$MODE" == "debug" ]]; then
-  case "$SANITIZER" in
-    asan) PREFIX="${PREFIX}-dbg" ;;
-    tsan) PREFIX="${PREFIX}-tsan" ;;
-  esac
-fi
-
-echo "=== conf_wiz configuration ==="
-echo "  mode        : $MODE"
-echo "  sanitizer   : $SANITIZER"
-echo "  march-native: $MARCH_NATIVE"
-echo "  libtype     : $LIBTYPE"
-echo "  prefix      : $PREFIX"
-echo "  jobs        : $JOBS"
-echo "  install     : $DO_INSTALL"
-echo "  dry-run     : $DRY_RUN"
-echo "  order       : ${REPOS[*]}"
-echo
-
-run() {
-  echo "+ $*"
-  [[ $DRY_RUN -eq 1 ]] || eval "$@"
+  # Always clean before building in the interleaved mode. Autotools does not
+  # invalidate stale .la files when the prefix or CXXFLAGS change, so a
+  # previous opt build's libFoo.la dependency_libs (pointing to the old
+  # prefix) will silently pollute a fresh debug/asan build.
+  local dir
+  dir="$(_project_dir "$project")"
+  make -C "$dir" clean -j"${OPT_JOBS}" >/dev/null 2>&1 || true
+  local rc=0
+  local tmplog
+  tmplog="$(mktemp)"
+  make -C "$dir" -j"${OPT_JOBS}" >"$tmplog" 2>&1 || rc=$?
+  if (( rc )); then
+    echo ""
+    echo "${RED}        ✗  build failed (exit ${rc})${RESET}"
+    echo ""
+    echo "${RED}  ── Build output ──────────────────────────────────────────────${RESET}"
+    _colorize_make < "$tmplog"
+    echo "${RED}  ──────────────────────────────────────────────────────────────${RESET}"
+    rm -f "$tmplog"
+    echo "${RED}  ✗ Build failed for ${project}.${RESET}" >&2
+    exit "$rc"
+  fi
+  rm -f "$tmplog"
+  echo "  ${GREEN}✓${RESET}"
 }
 
-# ---- build flag assembly ---------------------------------------------------
-CFLAGS_EXTRA=""
-CXXFLAGS_EXTRA=""
-LDFLAGS_EXTRA=""
+_install_one() {
+  local project="$1"
+  printf "        ${DIM}▸ installing ...${RESET}"
+  if (( OPT_DRY_RUN )); then
+    echo "  ${DIM}[dry-run]${RESET}"; return
+  fi
+  local dir
+  dir="$(_project_dir "$project")"
+  local rc=0
+  local tmplog
+  tmplog="$(mktemp)"
+  make -C "$dir" install -j"${OPT_JOBS}" >"$tmplog" 2>&1 || rc=$?
+  if (( rc )); then
+    echo ""
+    echo "${RED}        ✗  install failed (exit ${rc})${RESET}"
+    echo ""
+    echo "${RED}  ── Install output ─────────────────────────────────────────────${RESET}"
+    _colorize_make < "$tmplog"
+    echo "${RED}  ──────────────────────────────────────────────────────────────${RESET}"
+    rm -f "$tmplog"
+    echo "${RED}  ✗ Install failed for ${project}.${RESET}" >&2
+    exit "$rc"
+  fi
+  rm -f "$tmplog"
+  echo "  ${GREEN}✓${RESET}"
+}
 
-if [[ "$MODE" == "opt" ]]; then
-  CFLAGS_EXTRA="-O3"
-  CXXFLAGS_EXTRA="-O3"
-else
-  CFLAGS_EXTRA="-g -O0"
-  CXXFLAGS_EXTRA="-g -O0"
-  case "$SANITIZER" in
-    asan)
-      CFLAGS_EXTRA+=" -fsanitize=address -fno-omit-frame-pointer"
-      CXXFLAGS_EXTRA+=" -fsanitize=address -fno-omit-frame-pointer"
-      LDFLAGS_EXTRA+=" -fsanitize=address"
-      ;;
-    tsan)
-      CFLAGS_EXTRA+=" -fsanitize=thread -fno-omit-frame-pointer"
-      CXXFLAGS_EXTRA+=" -fsanitize=thread -fno-omit-frame-pointer"
-      LDFLAGS_EXTRA+=" -fsanitize=thread"
-      ;;
-    valgrind)
-      CFLAGS_EXTRA+=" -fno-omit-frame-pointer"
-      CXXFLAGS_EXTRA+=" -fno-omit-frame-pointer"
-      ;;
-    none) : ;;
-    *) echo "Unknown sanitizer: $SANITIZER" >&2; exit 1 ;;
-  esac
-fi
+run_configure() {
+  export PKG_CONFIG_PATH="${OPT_PREFIX}/lib/pkgconfig:${OPT_PREFIX}/lib64/pkgconfig:${PKG_CONFIG_PATH:-}"
+  mkdir -p "$OPT_PREFIX"
 
-if [[ $MARCH_NATIVE -eq 1 ]]; then
-  CFLAGS_EXTRA+=" -march=native -mtune=native"
-  CXXFLAGS_EXTRA+=" -march=native -mtune=native"
-fi
+  _STEP=0
+  _TOTAL=${#PROJECTS[@]}
 
-LIB_ARGS=()
-case "$LIBTYPE" in
-  static) LIB_ARGS=(--enable-static --disable-shared) ;;
-  shared) LIB_ARGS=(--disable-static --enable-shared) ;;
-  both)   LIB_ARGS=(--enable-static --enable-shared) ;;
-esac
+  # When building or installing, each project must be installed before the next
+  # can be configured (Cgl needs Clp's .pc file in PREFIX, Cbc needs all 4, etc.).
+  # Use interleaved mode: configure → build → install per project.
+  if (( OPT_DO_BUILD || OPT_DO_INSTALL )); then
+    local mode_lbl="configure"
+    (( OPT_DO_BUILD   )) && mode_lbl+=" + build"
+    (( OPT_DO_INSTALL )) && mode_lbl+=" + install"
+    _section "${mode_lbl}  (prefix: ${CYAN}${OPT_PREFIX}${RESET}${BLUE}, jobs: ${CYAN}${OPT_JOBS}${RESET}${BLUE})"
 
-mkdir -p "$PREFIX"
+    local _START=$SECONDS
+    for project in "${PROJECTS[@]}"; do
+      local dir
+      dir="$(_project_dir "$project")"
+      if [[ ! -d "$dir" ]]; then
+        echo "${YELLOW}  warning: $dir not found (submodule not initialized?) — skipping${RESET}" >&2
+        continue
+      fi
 
-# ---- per-project configure/build/install -----------------------------------
-for repo in "${REPOS[@]}"; do
-  dir="$WORKSPACE_ROOT/src/$repo"
-  if [[ ! -d "$dir" ]]; then
-    echo "warning: $dir not found (submodule not initialized?) — skipping" >&2
-    continue
+      _step "$project" "Configure+Build+Install"
+      printf "        ${DIM}▸ configuring ...${RESET}"
+
+      if (( OPT_DRY_RUN )); then
+        echo "  ${DIM}[dry-run]${RESET}"
+      else
+        local rc=0
+        local tmplog
+        tmplog="$(mktemp)"
+        (
+          cd "$dir"
+          ADD_CXXFLAGS="$FINAL_CXXFLAGS" CFLAGS="$FINAL_CFLAGS" LDFLAGS="$FINAL_LDFLAGS" \
+            ./configure --prefix="$OPT_PREFIX" "${CONFIGURE_OPTS[@]}"
+        ) >"$tmplog" 2>&1 || rc=$?
+        if (( rc )); then
+          echo ""
+          _fail
+          echo ""
+          echo "${RED}  ── Configure output ───────────────────────────────────────────${RESET}"
+          while IFS= read -r line; do echo "    ${DIM}${line}${RESET}"; done < "$tmplog"
+          echo "${RED}  ──────────────────────────────────────────────────────────────${RESET}"
+          rm -f "$tmplog"
+          echo "${RED}  ✗ configure failed for ${project} (exit ${rc}).${RESET}" >&2
+          exit "$rc"
+        fi
+        rm -f "$tmplog"
+        echo "  ${GREEN}✓${RESET}"
+      fi
+
+      (( OPT_DO_BUILD   )) && _build_one   "$project"
+      (( OPT_DO_INSTALL )) && _install_one "$project"
+      echo ""
+    done
+
+    local elapsed=$(( SECONDS - _START ))
+    printf "${BOLD}${GREEN}  ✓  All projects configured"
+    (( OPT_DO_BUILD   )) && printf ", built"
+    (( OPT_DO_INSTALL )) && printf ", installed"
+    printf ".  Elapsed: %dm%02ds${RESET}\n" $(( elapsed / 60 )) $(( elapsed % 60 ))
+    return
   fi
 
-  echo "=== [$repo] configure ==="
-  export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/lib64/pkgconfig:${PKG_CONFIG_PATH:-}"
-  run "cd '$dir' && ./configure --prefix='$PREFIX' ${LIB_ARGS[*]} \
-      CFLAGS='$CFLAGS_EXTRA' CXXFLAGS='$CXXFLAGS_EXTRA' LDFLAGS='$LDFLAGS_EXTRA'"
+  # Configure-only mode (prefix must already contain .pc files from a prior install).
+  _section "Configuring  (prefix: ${CYAN}${OPT_PREFIX}${RESET}${BLUE})"
+  echo "  ${YELLOW}Note: prefix must already contain installed .pc files from a prior build.${RESET}"
+  echo "  ${YELLOW}      If starting fresh, use --build/--install to interleave configure+build+install.${RESET}"
+  echo ""
 
-  if [[ $DO_INSTALL -eq 1 ]]; then
-    echo "=== [$repo] build (jobs=$JOBS) ==="
-    run "cd '$dir' && make -j$JOBS"
-    echo "=== [$repo] install ==="
-    run "cd '$dir' && make install"
+  for project in "${PROJECTS[@]}"; do
+    local dir
+    dir="$(_project_dir "$project")"
+    if [[ ! -d "$dir" ]]; then
+      echo "${YELLOW}  warning: $dir not found (submodule not initialized?) — skipping${RESET}" >&2
+      continue
+    fi
+    _step "$project" "Configuring"
+    if (( OPT_DRY_RUN )); then
+      echo "    ${DIM}[dry-run] ADD_CXXFLAGS='${FINAL_CXXFLAGS}' LDFLAGS='${FINAL_LDFLAGS}' \\"
+      echo "              ./configure --prefix=${OPT_PREFIX} ${CONFIGURE_OPTS[*]}${RESET}"
+      _ok; continue
+    fi
+    local rc=0
+    (
+      cd "$dir"
+      ADD_CXXFLAGS="$FINAL_CXXFLAGS" CFLAGS="$FINAL_CFLAGS" LDFLAGS="$FINAL_LDFLAGS" \
+        ./configure --prefix="$OPT_PREFIX" "${CONFIGURE_OPTS[@]}"
+    ) || rc=$?
+    if (( rc )); then
+      _fail
+      echo "${RED}  ✗ configure failed for ${project} (exit ${rc}).${RESET}" >&2
+      exit "$rc"
+    fi
+    _ok
+  done
+
+  echo ""
+  echo "${BOLD}${GREEN}  ✓  All projects configured.${RESET}"
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Main
+# ══════════════════════════════════════════════════════════════════════════════
+main() {
+  parse_args "$@"
+
+  validate_opts
+  derive_prefix
+
+  # Launch TUI when: no args given on a TTY, or --interactive was passed
+  if (( ! _ARGS_GIVEN && $([ -t 0 ] && [ -t 1 ]; echo $?) == 0 )) \
+     || (( OPT_INTERACTIVE )); then
+    run_tui
+    printf '\n\n'   # ensure output starts below TUI dialog residue
   fi
-done
 
-echo
-echo "conf_wiz done. Prefix: $PREFIX"
-[[ $DO_INSTALL -eq 0 ]] && echo "(configure-only run — use --install/--build, or re-run build.sh, to compile+install)"
+  build_flags
+  build_configure_opts
+
+  _banner
+  _print_summary
+
+  [[ "$OPT_DRY_RUN" == "1" ]] && echo "${YELLOW}  ── DRY RUN: no commands will be executed ──${RESET}"
+
+  run_configure
+
+  echo ""
+  echo "${BOLD}${GREEN}╔════════════════════════════════════╗${RESET}"
+  echo "${BOLD}${GREEN}║  All done!                         ║${RESET}"
+  echo "${BOLD}${GREEN}╚════════════════════════════════════╝${RESET}"
+  echo ""
+}
+
+main "$@"
