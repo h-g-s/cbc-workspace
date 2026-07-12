@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ══════════════════════════════════════════════════════════════════════════════
-#  conf_wiz  ─  Unified configure / build / install for cbc-workspace
+#  config  ─  Unified configure / build / install for cbc-workspace
 #
 #  Configures, in strict dependency order, the 5-project COIN-OR stack:
 #    CoinUtils -> Osi -> Clp -> Cgl -> Cbc
@@ -8,11 +8,11 @@
 #  pkg-config .pc files).
 #
 #  Usage (non-interactive):
-#    ./conf_wiz [OPTIONS]
+#    ./config [OPTIONS]
 #
 #  Usage (interactive TUI – run with no arguments on a terminal):
-#    ./conf_wiz
-#    ./conf_wiz --interactive
+#    ./config
+#    ./config --interactive
 #
 #  Options:
 #   Build mode:

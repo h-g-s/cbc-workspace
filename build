@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build.sh — incremental, dependency-aware build for the cbc-workspace multi-repo stack.
+# build — incremental, dependency-aware build for the cbc-workspace multi-repo stack.
 #
 # Order: CoinUtils -> Osi -> Clp -> Cgl -> Cbc
 #
@@ -11,10 +11,10 @@
 # rebuilds every downstream dependent, in addition to whatever changed directly.
 #
 # Usage:
-#   ./build.sh                # rebuild changed projects + dependents, then install
-#   ./build.sh --no-install   # build only, skip `make install`
-#   ./build.sh --force        # force full rebuild of all 5 projects
-#   ./build.sh CoinUtils Clp  # restrict "changed" set to these + their dependents
+#   ./build                # rebuild changed projects + dependents, then install
+#   ./build --no-install   # build only, skip `make install`
+#   ./build --force        # force full rebuild of all 5 projects
+#   ./build CoinUtils Clp  # restrict "changed" set to these + their dependents
 set -euo pipefail
 
 WORKSPACE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -51,7 +51,7 @@ for arg in "$@"; do
   esac
 done
 
-echo "=== build.sh (jobs=$JOBS, install=$DO_INSTALL, force=$FORCE) ==="
+echo "=== build (jobs=$JOBS, install=$DO_INSTALL, force=$FORCE) ==="
 
 # ---- compute current state (commit + dirty flag) per submodule ------------
 declare -A CUR_STATE
@@ -140,4 +140,4 @@ done
 } > "$STATE_FILE"
 
 echo
-echo "build.sh done."
+echo "build done."

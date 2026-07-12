@@ -60,35 +60,35 @@ git commit -m "Bump <Project> to latest next"
 
 ## Build Commands
 
-### Preferred workflow — `conf_wiz` (all-in-one, multi-repo aware)
+### Preferred workflow — `config` (all-in-one, multi-repo aware)
 
-`conf_wiz` is the **single entry point** for configuring, building, and installing
+`config` is the **single entry point** for configuring, building, and installing
 the full CoinUtils → Osi → Clp → Cgl → Cbc stack into one shared prefix.
 
 ```sh
 # Interactive mode (no arguments) — walks through all options, project by project:
-./conf_wiz
+./config
 
 # Non-interactive — configure + build + install everything in one shot:
-./conf_wiz --opt --install
+./config --opt --install
 
 # Debug build with AddressSanitizer:
-./conf_wiz --debug --sanitizer=asan --install
+./config --debug --sanitizer=asan --install
 
 # Debug build with ThreadSanitizer:
-./conf_wiz --debug --sanitizer=tsan --install
+./config --debug --sanitizer=tsan --install
 
 # Configure only (requires a previously installed prefix for .pc file discovery):
-./conf_wiz --opt
+./config --opt
 
 # Custom prefix, jobs, shared libs:
-./conf_wiz --opt --install --prefix=/opt/cbc --jobs=8 --shared
+./config --opt --install --prefix=/opt/cbc --jobs=8 --shared
 
 # Enable AVX2 hand-written SIMD paths (x86_64 only):
-./conf_wiz --opt --avx2 --install
+./config --opt --avx2 --install
 
 # Target a specific CPU generation (haswell = AVX2+FMA+BMI2, 2013):
-./conf_wiz --opt --arch=haswell --avx2 --install
+./config --opt --arch=haswell --avx2 --install
 ```
 
 Key options (mirrors MIPster's `configster`, adapted for 5 independent projects):
@@ -118,12 +118,12 @@ Key options (mirrors MIPster's `configster`, adapted for 5 independent projects)
 > generations). This is a deliberate difference from `configster`, which only adds
 > it conditionally.
 
-**Behaviour:** with **no arguments**, `conf_wiz` enters interactive mode by default
+**Behaviour:** with **no arguments**, `config` enters interactive mode by default
 (prompts for build mode, sanitizer, target arch, AVX2, prefix, jobs, library type).
 **With any argument**, it skips the interactive prompts and goes straight to
 configuring (and building/installing if `--install`/`--build` is given).
 
-> **Important:** `conf_wiz` always processes the 5 projects **in dependency order**
+> **Important:** `config` always processes the 5 projects **in dependency order**
 > and, when `--install` is given, interleaves configure → build → install **per
 > project** (same rationale as `configster`): each project's `.pc` files must be in
 > `$PREFIX/lib/pkgconfig` before the next project's `configure` runs, since
@@ -134,26 +134,26 @@ Debug builds install to a suffixed prefix based on sanitizer: `$PREFIX-asan`,
 matching `configster`'s `derive_prefix` convention.
 
 > **Note:** NEON hand-written SIMD support was evaluated and dropped — it showed
-> no measurable speedup, so `conf_wiz` (unlike `configster`) does not offer a
+> no measurable speedup, so `config` (unlike `configster`) does not offer a
 > `--neon` option. AVX2 is still offered since it is useful on x86_64.
 
-### Incremental rebuilds — `build.sh`
+### Incremental rebuilds — `build`
 
-After the initial `conf_wiz` run has configured every project, use `build.sh` for
+After the initial `config` run has configured every project, use `build` for
 day-to-day incremental builds:
 
 ```sh
-./build.sh              # rebuild whatever changed (+ dependents), install, use all cores
-./build.sh --no-install  # build only, skip `make install`
-./build.sh --force       # force a full rebuild of all 5 projects regardless of diffs
-./build.sh CoinUtils     # rebuild only this project and everything that depends on it
+./build              # rebuild whatever changed (+ dependents), install, use all cores
+./build --no-install  # build only, skip `make install`
+./build --force       # force a full rebuild of all 5 projects regardless of diffs
+./build CoinUtils     # rebuild only this project and everything that depends on it
 ```
 
 > ⚠️ **Critical — cross-project rebuilds are NOT automatic.** These are five
 > independent autotools projects linked via installed `.pc`/library files, not a
 > single Makefile with real header/library dependencies. If `CoinUtils` changes,
 > `make` inside `Clp`/`Cgl`/`Cbc` has **no idea** anything changed — it will happily
-> link against a stale installed `libCoinUtils`. **`build.sh` compensates for this
+> link against a stale installed `libCoinUtils`. **`build` compensates for this
 > by tracking each submodule's git commit (+ dirty-tree state) and force-cleaning
 > and rebuilding every downstream dependent whenever an upstream project's sources
 > changed**, using this dependency map:
@@ -167,15 +167,15 @@ day-to-day incremental builds:
 > | `Cbc` | *(itself only)* |
 >
 > Never hand-roll a partial rebuild (e.g. `cd src/Cbc && make`) after touching
-> `CoinUtils`/`Osi`/`Clp`/`Cgl` — use `build.sh`, or you will silently test against
+> `CoinUtils`/`Osi`/`Clp`/`Cgl` — use `build`, or you will silently test against
 > stale dependency libraries.
 
 State is tracked in `.build-state` (gitignored) at the workspace root.
 
 ## Hardware & Parallelism
 
-Exploit all cores of the machine. Every script in this workspace (`conf_wiz`,
-`build.sh`) defaults its job count to `$(nproc)` and never hardcodes a lower value.
+Exploit all cores of the machine. Every script in this workspace (`config`,
+`build`) defaults its job count to `$(nproc)` and never hardcodes a lower value.
 
 - **`GNU parallel`** should be used for dispatching independent solver runs
   (benchmarking Cbc across many instances), same pattern as MIPster.

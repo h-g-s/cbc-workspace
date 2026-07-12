@@ -17,13 +17,13 @@ git clone --recurse-submodules git@github.com:h-g-s/cbc-workspace.git
 cd cbc-workspace
 
 # Interactive configuration wizard:
-./conf_wiz
+./config
 
 # Or non-interactive, configure + build + install everything:
-./conf_wiz --opt --install
+./config --opt --install
 
 # Later, incremental rebuilds after editing sources (dependency-aware):
-./build.sh
+./build
 ```
 
 See `AGENTS.md` for full documentation: build system details, branching
