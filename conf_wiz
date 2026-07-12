@@ -1,0 +1,215 @@
+#!/usr/bin/env bash
+# conf_wiz — configure/build/install wizard for the cbc-workspace multi-repo stack.
+#
+# Builds, in strict dependency order, into one shared prefix:
+#   CoinUtils -> Osi -> Clp -> Cgl -> Cbc
+#
+# With NO arguments: enters an interactive TUI that walks through the options.
+# With ANY argument: skips the interactive prompts and configures directly
+# (and builds/installs too, if --install/--build is given).
+set -euo pipefail
+
+WORKSPACE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPOS=(CoinUtils Osi Clp Cgl Cbc)
+
+# ---- defaults -----------------------------------------------------------
+MODE="opt"                 # opt | debug
+SANITIZER="none"           # none | asan | tsan | valgrind
+MARCH_NATIVE=1
+LIBTYPE="static"           # static | shared | both
+PREFIX="${CBC_WORKSPACE_PREFIX:-$HOME/prog/cbc-ws}"
+JOBS="$(nproc)"
+DO_INSTALL=0
+DRY_RUN=0
+
+usage() {
+  cat <<EOF
+Usage: ./conf_wiz [options]
+
+With no options, runs an interactive wizard.
+
+Options:
+  --opt                       Optimised build (default)
+  --debug                     Debug build
+  --sanitizer=none|asan|tsan|valgrind   Sanitizer (debug builds only, default: none)
+  --march-native               Enable -march=native -mtune=native (default: on)
+  --no-march-native            Disable -march=native -mtune=native
+  --static                     Build static libs only (default)
+  --shared                     Build shared libs only
+  --both                       Build both static and shared libs
+  --prefix=PATH                Install prefix (default: \$CBC_WORKSPACE_PREFIX or ~/prog/cbc-ws)
+  --jobs=N                     Parallel make jobs for every project (default: nproc = $(nproc))
+  --install                    Build + install after configure (per project, in order)
+  --build                      Alias for --install
+  --dry-run                    Print commands without running them
+  -h, --help                    Show this help
+EOF
+}
+
+# ---- arg parsing ----------------------------------------------------------
+INTERACTIVE=1
+if [[ $# -gt 0 ]]; then
+  INTERACTIVE=0
+fi
+
+for arg in "$@"; do
+  case "$arg" in
+    --opt) MODE="opt" ;;
+    --debug) MODE="debug" ;;
+    --sanitizer=*) SANITIZER="${arg#*=}" ;;
+    --march-native) MARCH_NATIVE=1 ;;
+    --no-march-native) MARCH_NATIVE=0 ;;
+    --static) LIBTYPE="static" ;;
+    --shared) LIBTYPE="shared" ;;
+    --both) LIBTYPE="both" ;;
+    --prefix=*) PREFIX="${arg#*=}" ;;
+    --jobs=*) JOBS="${arg#*=}" ;;
+    --install|--build) DO_INSTALL=1 ;;
+    --dry-run) DRY_RUN=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown option: $arg" >&2; usage; exit 1 ;;
+  esac
+done
+
+# ---- interactive wizard ----------------------------------------------------
+ask() {
+  local prompt="$1" default="$2" var
+  read -r -p "$prompt [$default]: " var
+  echo "${var:-$default}"
+}
+
+ask_choice() {
+  local prompt="$1" default="$2"; shift 2
+  local choices=("$@")
+  echo "$prompt"
+  select opt in "${choices[@]}"; do
+    if [[ -n "$opt" ]]; then echo "$opt"; return; fi
+    echo "$default"; return
+  done
+}
+
+if [[ $INTERACTIVE -eq 1 ]]; then
+  echo "=== conf_wiz — cbc-workspace interactive configuration wizard ==="
+  echo "Projects to configure (in order): ${REPOS[*]}"
+  echo
+
+  mode_choice=$(ask_choice "Build mode:" "opt" "opt" "debug")
+  MODE="$mode_choice"
+
+  if [[ "$MODE" == "debug" ]]; then
+    san_choice=$(ask_choice "Sanitizer:" "none" "none" "asan" "tsan" "valgrind")
+    SANITIZER="$san_choice"
+  fi
+
+  march_choice=$(ask_choice "Enable -march=native -mtune=native?" "yes" "yes" "no")
+  [[ "$march_choice" == "yes" ]] && MARCH_NATIVE=1 || MARCH_NATIVE=0
+
+  lib_choice=$(ask_choice "Library type:" "static" "static" "shared" "both")
+  LIBTYPE="$lib_choice"
+
+  PREFIX=$(ask "Install prefix" "$PREFIX")
+  JOBS=$(ask "Parallel make jobs" "$JOBS")
+
+  install_choice=$(ask_choice "Build + install after configure?" "yes" "yes" "no")
+  [[ "$install_choice" == "yes" ]] && DO_INSTALL=1 || DO_INSTALL=0
+
+  dry_choice=$(ask_choice "Dry run (print commands only)?" "no" "no" "yes")
+  [[ "$dry_choice" == "yes" ]] && DRY_RUN=1 || DRY_RUN=0
+
+  echo
+fi
+
+# Adjust prefix / sanitizer suffix like configster convention.
+if [[ "$MODE" == "debug" ]]; then
+  case "$SANITIZER" in
+    asan) PREFIX="${PREFIX}-dbg" ;;
+    tsan) PREFIX="${PREFIX}-tsan" ;;
+  esac
+fi
+
+echo "=== conf_wiz configuration ==="
+echo "  mode        : $MODE"
+echo "  sanitizer   : $SANITIZER"
+echo "  march-native: $MARCH_NATIVE"
+echo "  libtype     : $LIBTYPE"
+echo "  prefix      : $PREFIX"
+echo "  jobs        : $JOBS"
+echo "  install     : $DO_INSTALL"
+echo "  dry-run     : $DRY_RUN"
+echo "  order       : ${REPOS[*]}"
+echo
+
+run() {
+  echo "+ $*"
+  [[ $DRY_RUN -eq 1 ]] || eval "$@"
+}
+
+# ---- build flag assembly ---------------------------------------------------
+CFLAGS_EXTRA=""
+CXXFLAGS_EXTRA=""
+LDFLAGS_EXTRA=""
+
+if [[ "$MODE" == "opt" ]]; then
+  CFLAGS_EXTRA="-O3"
+  CXXFLAGS_EXTRA="-O3"
+else
+  CFLAGS_EXTRA="-g -O0"
+  CXXFLAGS_EXTRA="-g -O0"
+  case "$SANITIZER" in
+    asan)
+      CFLAGS_EXTRA+=" -fsanitize=address -fno-omit-frame-pointer"
+      CXXFLAGS_EXTRA+=" -fsanitize=address -fno-omit-frame-pointer"
+      LDFLAGS_EXTRA+=" -fsanitize=address"
+      ;;
+    tsan)
+      CFLAGS_EXTRA+=" -fsanitize=thread -fno-omit-frame-pointer"
+      CXXFLAGS_EXTRA+=" -fsanitize=thread -fno-omit-frame-pointer"
+      LDFLAGS_EXTRA+=" -fsanitize=thread"
+      ;;
+    valgrind)
+      CFLAGS_EXTRA+=" -fno-omit-frame-pointer"
+      CXXFLAGS_EXTRA+=" -fno-omit-frame-pointer"
+      ;;
+    none) : ;;
+    *) echo "Unknown sanitizer: $SANITIZER" >&2; exit 1 ;;
+  esac
+fi
+
+if [[ $MARCH_NATIVE -eq 1 ]]; then
+  CFLAGS_EXTRA+=" -march=native -mtune=native"
+  CXXFLAGS_EXTRA+=" -march=native -mtune=native"
+fi
+
+LIB_ARGS=()
+case "$LIBTYPE" in
+  static) LIB_ARGS=(--enable-static --disable-shared) ;;
+  shared) LIB_ARGS=(--disable-static --enable-shared) ;;
+  both)   LIB_ARGS=(--enable-static --enable-shared) ;;
+esac
+
+mkdir -p "$PREFIX"
+
+# ---- per-project configure/build/install -----------------------------------
+for repo in "${REPOS[@]}"; do
+  dir="$WORKSPACE_ROOT/src/$repo"
+  if [[ ! -d "$dir" ]]; then
+    echo "warning: $dir not found (submodule not initialized?) — skipping" >&2
+    continue
+  fi
+
+  echo "=== [$repo] configure ==="
+  export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/lib64/pkgconfig:${PKG_CONFIG_PATH:-}"
+  run "cd '$dir' && ./configure --prefix='$PREFIX' ${LIB_ARGS[*]} \
+      CFLAGS='$CFLAGS_EXTRA' CXXFLAGS='$CXXFLAGS_EXTRA' LDFLAGS='$LDFLAGS_EXTRA'"
+
+  if [[ $DO_INSTALL -eq 1 ]]; then
+    echo "=== [$repo] build (jobs=$JOBS) ==="
+    run "cd '$dir' && make -j$JOBS"
+    echo "=== [$repo] install ==="
+    run "cd '$dir' && make install"
+  fi
+done
+
+echo
+echo "conf_wiz done. Prefix: $PREFIX"
+[[ $DO_INSTALL -eq 0 ]] && echo "(configure-only run — use --install/--build, or re-run build.sh, to compile+install)"

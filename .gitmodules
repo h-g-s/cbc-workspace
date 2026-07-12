@@ -1,0 +1,20 @@
+[submodule "src/CoinUtils"]
+	path = src/CoinUtils
+	url = https://github.com/coin-or/CoinUtils.git
+	branch = next
+[submodule "src/Osi"]
+	path = src/Osi
+	url = https://github.com/coin-or/Osi.git
+	branch = next
+[submodule "src/Clp"]
+	path = src/Clp
+	url = https://github.com/coin-or/Clp.git
+	branch = next
+[submodule "src/Cgl"]
+	path = src/Cgl
+	url = https://github.com/coin-or/Cgl.git
+	branch = next
+[submodule "src/Cbc"]
+	path = src/Cbc
+	url = https://github.com/coin-or/Cbc.git
+	branch = next
