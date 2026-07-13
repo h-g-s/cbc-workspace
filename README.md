@@ -79,5 +79,70 @@ afterwards, since downstream projects discover their dependencies through the
 shared prefix's installed headers/libraries/`.pc` files, not the in-tree build
 output.
 
+## `test`
+
+```sh
+./test                          # run the full mip-sanity-data suite (all cores)
+./test --jobs=4                 # cap parallelism
+./test 'bpc_*' 'cvrp_*'         # only run instances matching these glob patterns
+```
+
+`test` (a symlink to `Cbc/test/run-mip-sanity-tests`) builds Cbc's regression
+suite around [`mip-sanity-data`](https://github.com/h-g-s/mip-sanity-data): a
+collection of MIP instances with known optimal/best-known solutions. It runs
+`k` instances in parallel (`k` = number of cores by default, one Cbc thread
+each), honoring the node/time limits suggested per-instance in `limits.tsv`,
+then validates every saved solution's feasibility (bounds, integrality,
+constraints) and objective value against the recorded best-known solution —
+flagging any claimed-optimal solution that doesn't match the recorded optimum
+within tolerance.
+
+Output stays brief while everything goes well — one live-streamed line per
+instance as it finishes, colored in the terminal (green `✔` for pass, yellow
+`⏱` for overtime/hard-kill, red `✗` for fail/error) — and expands to full cbc
++ validator logs automatically for anything that fails:
+
+```
+=== Cbc mip-sanity-data regression suite (jobs=12) ===
+365 instance(s) selected (of 365 total).
+
+Running... (results stream in as instances finish; order is by completion, not by name)
+[  1/365] ✔ bpc_n12_c150_sd42_clique_diverse            (0.1s)  Optimal solution found  obj=4  nodes=0
+[  6/365] ✔ bpc_search_n13_c150_sd137_random_d0.2_uniform (2.9s)  Optimal solution found  obj=4  nodes=224
+[ 18/365] ✔ cttp_infeasible_c10t12_r2-4_sd2              (0.5s)  Infeasible (detected in presolve/root)  nodes=0
+[ 94/365] ✗ fcnf_search_n55_d10_s3_4_sl0.95_sd7          (31.3s)  Optimal solution found  obj=10980.59  nodes=2630  MISMATCH: claimed-optimal objective 10980.59 does not match best-known value 10979.16 — full details below
+[362/365] ✔ upms_n9_m3_int_cmax_s137                    (120.2s)  Stopped on time limit  obj=57  bound=45  gap=26.67%  nodes=150836
+
+=== Summary ===
+  Result                              Count
+  ────────────────────────────────────────
+  Passed                                363
+  Failed                                  2
+  Overtime                                0
+  Error                                   0
+  ────────────────────────────────────────
+  Total                                 365
+
+=== Solve statistics ===
+  Metric                              Value
+  ────────────────────────────────────────
+  Optimal solutions found         284 / 365
+  Total runtime                     8660.0s
+  Total nodes processed           3,533,952
+  Average gap                         4.36%
+
+  Slowest instance:          upms_n9_m2_lgset_cmax_s137  (301.0s)
+  Most nodes processed:      upms_n9_m2_lgset_cmax_s137  (669,332 nodes)
+
+=== Failure details ===
+─── fcnf_search_n55_d10_s3_4_sl0.95_sd7 ─────────────────────────────────────────────
+-- cbc log (.../fcnf_search_n55_d10_s3_4_sl0.95_sd7.cbc.log) --
+...full cbc + validator output for diagnosis...
+```
+
+`test` runs automatically in CI (`Cbc/.github/workflows/sanity-tests.yml`)
+right after building Cbc. See `Cbc/test/run-mip-sanity-tests` and
+`Cbc/test/cbc_validate_sol.cpp` for the orchestrator/validator implementation.
+
 See `AGENTS.md` for full documentation: build system details, branching
 convention, dependency-aware rebuild rules, and testing guidance.
