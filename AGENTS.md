@@ -58,6 +58,32 @@ git add <Project>
 git commit -m "Bump <Project> to latest next"
 ```
 
+## Custom Autotools (COIN-OR BuildTools)
+
+> ⚠️ Each of the 5 submodules uses **COIN-OR's patched autotools** (via
+> `BuildTools`, checked out separately at `~/dev/BuildTools`), not the
+> system's stock `autoconf`/`automake`/`libtool`. **Never run plain
+> `autoreconf`/`automake` from `$PATH`** after editing a `configure.ac` or
+> `Makefile.am` — it will silently drop COIN-specific macros/patches and
+> produce a broken build.
+
+The custom autotools binaries are pre-installed at `~/prog/coin-autotools`
+(automake 1.17, autoconf 2.72, libtool). Point `COIN_AUTOTOOLS_DIR` there and
+use `BuildTools/run_autotools` to regenerate `configure`/`Makefile.in` after
+touching a submodule's `configure.ac`/`Makefile.am`:
+
+```sh
+export COIN_AUTOTOOLS_DIR=~/prog/coin-autotools
+~/dev/BuildTools/run_autotools /path/to/submodule   # e.g. cbc-workspace/Cbc
+```
+
+For convenience, `./regen-autotools <Project>` (workspace root) wraps this
+(sets `COIN_AUTOTOOLS_DIR` and calls `run_autotools` for the given submodule).
+Run it any time you add/remove a `bin_PROGRAMS`/`noinst_PROGRAMS` entry, a
+new source file list, or otherwise edit `Makefile.am`/`configure.ac` in a
+submodule — `configure`/`Makefile.in` are checked into git and must stay in
+sync with the `.am`/`.ac` sources.
+
 ## Build Commands
 
 ### Preferred workflow — `config` (all-in-one, multi-repo aware)
@@ -240,14 +266,67 @@ Exploit all cores of the machine. Every script in this workspace (`config`,
 
 ## Testing
 
-Each project has its own test suite (`make check` / `test/` directory, depending on
-the project). Run tests for a project after building it:
+### Cbc's mip-sanity-data regression suite — `./test`
+
+Cbc's main regression suite solves real MIP instances from the
+[`h-g-s/mip-sanity-data`](https://github.com/h-g-s/mip-sanity-data) dataset
+(365 instances across 16 problem families, each with a certified best-known/
+optimal objective in `bks.tsv` and suggested node/time limits in
+`limits.tsv`) and validates every saved solution. This suite is **entirely
+self-contained in the `Cbc` repository** (on `next`) — `mip-sanity-data` is
+wired in as a submodule at `Cbc/test/mip-sanity-data`, and the orchestration
+script/validator live at `Cbc/test/run-mip-sanity-tests` /
+`Cbc/test/cbc_validate_sol.cpp` — so it works from a standalone `Cbc` clone,
+not just from within this workspace. `./test` at the cbc-workspace root is
+just a convenience symlink to `Cbc/test/run-mip-sanity-tests`.
+
 ```sh
-cd Cbc/test && make -j$(nproc) && make test
+./config --opt --install     # build everything first
+./test                        # run the full suite (all instances, nproc jobs)
+./test 'jssp_*' 'cvrp_*'      # only instances matching these glob patterns
+./test --jobs=4               # override parallelism
+./test --update-data          # refresh the mip-sanity-data submodule first
+```
+
+How it works, per instance:
+1. Runs `cbc <instance>.mps.gz -threads 1 -sec <time_limit> -maxNodes <node_limit>
+   -solve -solu <instance>.sol` (one Cbc thread per instance; up to `--jobs`
+   instances run concurrently via GNU parallel), using the suggested limits
+   from `limits.tsv` (falls back to unlimited nodes / 120s / 180s hard-kill
+   for instances not listed there).
+2. Runs `cbc_validate_sol` against the saved `.sol` file, which:
+   - parses Cbc's solution header to classify the run's status (proven
+     optimal, proven infeasible, stopped-with-a-solution, or
+     stopped-with-**no** integer solution — in which case the listed values
+     are the fractional LP relaxation and are *not* checked for
+     integrality/row feasibility, since Cbc saves that fractional solution
+     when no integer-feasible one was found);
+   - for genuine integer-feasible solutions: checks variable bounds,
+     integrality, and every row's activity (tolerance `1e-4`), and
+     recomputes the objective from the solution vector;
+   - if optimality is claimed, cross-checks the objective against `bks.tsv`
+     (tolerance `max(1e-4 absolute, 0.01% relative)`) — a mismatch is a hard
+     error;
+   - if infeasibility is claimed, cross-checks against `bks.tsv`'s expected
+     status — a false infeasibility claim is a hard error.
+3. Prints colored pass/fail progress per instance, then a summary; full Cbc
+   log + validator output is printed for every failure.
+
+Runs automatically in CI (`.github/workflows/sanity-tests.yml` in Cbc) on
+every push/PR to `next`.
+
+### Other projects
+
+Each of the other 4 projects has its own test suite (`make check` / `test/`
+directory, depending on the project). Run tests for a project after building
+it, e.g.:
+```sh
+cd Osi/test && make -j$(nproc) && make test
 ```
 Prefer testing the specific project(s) whose code changed rather than the whole
 stack, unless the change is in a lower layer (`CoinUtils`, `Osi`, `Clp`) that could
-affect everything downstream — in that case re-test all downstream projects too.
+affect everything downstream — in that case re-test all downstream projects too
+(including Cbc's `./test`).
 
 ## Related Work
 

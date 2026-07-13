@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# regen-autotools — regenerate configure/Makefile.in for a submodule using
+# COIN-OR's patched autotools (BuildTools/run_autotools), never the system's
+# stock autoconf/automake/libtool.
+#
+# Usage:
+#   ./regen-autotools <Project>       # e.g. ./regen-autotools Cbc
+#
+# Requires:
+#   - ~/dev/BuildTools checked out (COIN-OR BuildTools, provides run_autotools)
+#   - ~/prog/coin-autotools installed (see BuildTools/install_autotools.sh),
+#     or set COIN_AUTOTOOLS_DIR to point at your own install prefix.
+set -euo pipefail
+
+WORKSPACE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BUILDTOOLS_DIR="${BUILDTOOLS_DIR:-$HOME/dev/BuildTools}"
+export COIN_AUTOTOOLS_DIR="${COIN_AUTOTOOLS_DIR:-$HOME/prog/coin-autotools}"
+
+if [[ $# -ne 1 ]]; then
+  echo "Usage: $0 <Project>   (one of: CoinUtils Osi Clp Cgl Cbc)" >&2
+  exit 1
+fi
+
+project="$1"
+project_dir="$WORKSPACE_ROOT/$project"
+
+if [[ ! -d "$project_dir" ]]; then
+  echo "Error: no such submodule directory: $project_dir" >&2
+  exit 1
+fi
+
+if [[ ! -x "$BUILDTOOLS_DIR/run_autotools" ]]; then
+  echo "Error: run_autotools not found at $BUILDTOOLS_DIR/run_autotools" >&2
+  echo "       (set BUILDTOOLS_DIR if BuildTools lives elsewhere)" >&2
+  exit 1
+fi
+
+if [[ ! -d "$COIN_AUTOTOOLS_DIR/bin" ]]; then
+  echo "Error: COIN_AUTOTOOLS_DIR ($COIN_AUTOTOOLS_DIR) has no bin/ dir." >&2
+  echo "       Install the custom autotools first (BuildTools/install_autotools.sh)." >&2
+  exit 1
+fi
+
+echo "=== Regenerating autotools for $project (COIN_AUTOTOOLS_DIR=$COIN_AUTOTOOLS_DIR) ==="
+PATH="$COIN_AUTOTOOLS_DIR/bin:$PATH" "$BUILDTOOLS_DIR/run_autotools" "$project_dir"
+echo "=== Done. Review 'git diff' in $project for regenerated configure/Makefile.in ==="
