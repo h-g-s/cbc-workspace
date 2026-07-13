@@ -98,8 +98,13 @@ if [[ $DRY_RUN -eq 0 ]]; then
 fi
 
 # ── 2. Collect the set of binaries/libs to fix up ───────────────────────────
-mapfile -t BIN_FILES < <(find "$DIST_ROOT/bin" -maxdepth 1 -type f 2>/dev/null || true)
-mapfile -t LIB_FILES < <(find "$DIST_ROOT/lib" -maxdepth 1 -type f \( -name '*.so*' -o -name '*.dylib' \) 2>/dev/null || true)
+# `mapfile`/`readarray` is a bash 4+ builtin, unavailable on macOS's stock
+# /bin/bash (3.2, frozen by Apple at the last GPLv2 release) — use a portable
+# while-read loop instead so this works on bash 3.2 through 5.x alike.
+BIN_FILES=()
+while IFS= read -r _f; do BIN_FILES+=("$_f"); done < <(find "$DIST_ROOT/bin" -maxdepth 1 -type f 2>/dev/null || true)
+LIB_FILES=()
+while IFS= read -r _f; do LIB_FILES+=("$_f"); done < <(find "$DIST_ROOT/lib" -maxdepth 1 -type f \( -name '*.so*' -o -name '*.dylib' \) 2>/dev/null || true)
 
 if [[ $DRY_RUN -eq 1 ]]; then
   echo "+ would bundle deps for: ${BIN_FILES[*]:-<none>} ${LIB_FILES[*]:-<none>}"

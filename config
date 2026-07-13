@@ -761,28 +761,28 @@ run_tui_plain() {
 
   if [[ "$ARCH" == "x86_64" ]]; then
     read -rp "  Enable -DCOIN_AVX2=4 hand-written SIMD? [y/N]: " yn
-    [[ "${yn,,}" == "y" ]] && OPT_AVX2=1
+    [[ "$yn" == [Yy]* ]] && OPT_AVX2=1
   fi
 
   if (( LAPACK_AVAIL )); then
     read -rp "  Use LAPACK/BLAS (${LAPACK_WHAT:-detected})? [Y/n]: " yn
-    [[ "${yn,,}" == "n" ]] && OPT_LAPACK=0 || OPT_LAPACK=1
+    [[ "$yn" == [Nn]* ]] && OPT_LAPACK=0 || OPT_LAPACK=1
   fi
   if (( AMD_AVAIL )); then
     read -rp "  Enable SuiteSparse AMD ordering (Clp Cholesky)? [Y/n]: " yn
-    [[ "${yn,,}" == "n" ]] && OPT_AMD=0 || OPT_AMD=1
+    [[ "$yn" == [Nn]* ]] && OPT_AMD=0 || OPT_AMD=1
   fi
   if (( ZLIB_AVAIL )); then
     read -rp "  Enable zlib (.gz compressed file I/O)? [Y/n]: " yn
-    [[ "${yn,,}" == "n" ]] && OPT_ZLIB=0 || OPT_ZLIB=1
+    [[ "$yn" == [Nn]* ]] && OPT_ZLIB=0 || OPT_ZLIB=1
   fi
   if (( BZ2_AVAIL )); then
     read -rp "  Enable bzip2 (.bz2 compressed file I/O)? [Y/n]: " yn
-    [[ "${yn,,}" == "n" ]] && OPT_BZ2=0 || OPT_BZ2=1
+    [[ "$yn" == [Nn]* ]] && OPT_BZ2=0 || OPT_BZ2=1
   fi
   if (( NAUTY_AVAIL )); then
     read -rp "  Enable Nauty (graph automorphism, Cbc symmetry cuts)? [Y/n]: " yn
-    [[ "${yn,,}" == "n" ]] && OPT_NAUTY=0 || OPT_NAUTY=1
+    [[ "$yn" == [Nn]* ]] && OPT_NAUTY=0 || OPT_NAUTY=1
   fi
 
   read -rp "  Library type [static/shared/both] (default: static): " yn
@@ -796,11 +796,11 @@ run_tui_plain() {
   [[ -n "$yn" ]] && OPT_JOBS="$yn"
 
   read -rp "  Run build after configure? [y/N]: " yn
-  [[ "${yn,,}" == "y" ]] && OPT_DO_BUILD=1
+  [[ "$yn" == [Yy]* ]] && OPT_DO_BUILD=1
 
   if (( OPT_DO_BUILD )); then
     read -rp "  Run install after build? [y/N]: " yn
-    [[ "${yn,,}" == "y" ]] && OPT_DO_INSTALL=1
+    [[ "$yn" == [Yy]* ]] && OPT_DO_INSTALL=1
   fi
 }
 
