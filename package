@@ -250,9 +250,13 @@ fi
 
 # ── 5. Archive ────────────────────────────────────────────────────────────────
 mkdir -p "$OPT_OUT"
+# Resolve OPT_OUT to an absolute path *before* cd-ing into STAGE_DIR below —
+# otherwise a relative --out=... (e.g. the common "--out=dist") would be
+# looked up relative to STAGE_DIR instead of the original working directory.
+OPT_OUT_ABS="$(cd "$OPT_OUT" && pwd)"
 if [[ "$OS_KIND" == "windows" ]]; then
   OUT_FILE="$OPT_OUT/$OPT_NAME.zip"
-  ( cd "$STAGE_DIR" && zip -qr "$(cd "$OPT_OUT" && pwd)/$(basename "$OUT_FILE")" "$OPT_NAME" )
+  ( cd "$STAGE_DIR" && zip -qr "$OPT_OUT_ABS/$(basename "$OUT_FILE")" "$OPT_NAME" )
 else
   OUT_FILE="$OPT_OUT/$OPT_NAME.tar.gz"
   tar -czf "$OUT_FILE" -C "$STAGE_DIR" "$OPT_NAME"
