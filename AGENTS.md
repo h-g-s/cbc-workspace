@@ -315,6 +315,41 @@ How it works, per instance:
 Runs automatically in CI (`.github/workflows/sanity-tests.yml` in Cbc) on
 every push/PR to `next`.
 
+### Checking for regressions/improvements — `./compare-results`
+
+`./test` always saves a per-instance results table to a TSV file — default
+`Cbc/test/sanity-results/results.tsv`, overridable with
+`--results-tsv=PATH` — with columns `instance status elapsed_s nodes
+gap_pct is_optimal obj bound` (`status` is the validator outcome:
+PASS/FAIL/OVERTIME/ERROR; `is_optimal` is 1 only for a confirmed/validated
+optimum). **Whenever you implement a solver change (new cut, heuristic,
+branching rule, etc.), always benchmark it against a baseline** using
+`./compare-results` (a symlink to `Cbc/test/compare-mip-sanity-results`):
+
+```sh
+./test --results-tsv=/tmp/baseline.tsv        # run the suite before your change
+# ...implement the change, rebuild with ./build...
+./test --results-tsv=/tmp/after.tsv           # run the suite again after
+./compare-results /tmp/baseline.tsv /tmp/after.tsv
+```
+
+`compare-results` prints an aggregate table (Passed/Failed/Overtime/Error
+counts, confirmed-optimal count, average gap — each with a baseline/new/delta
+column) plus a per-instance breakdown:
+- **Regressions** — any instance whose validated status got strictly worse
+  (e.g. `PASS -> FAIL/OVERTIME/ERROR`), or whose gap widened by more than
+  `--gap-tol` (default `0.01` percentage points). This is what to watch for:
+  more errors/overtimes, or wider gaps, indicate the change hurt performance
+  or correctness.
+- **Improvements** — the inverse: a status that got better, or a gap that
+  narrowed by more than `--gap-tol`.
+
+It exits `0` if no regressions were found and `1` otherwise, so it can gate
+a script/CI step. Instances present in only one of the two files (e.g. after
+`--update-data`, or when comparing a subset run against a full run) are
+reported separately and excluded from the aggregate/per-instance comparison.
+See `Cbc/test/compare-mip-sanity-results --help` for the full option list.
+
 ### Other projects
 
 Each of the other 4 projects has its own test suite (`make check` / `test/`

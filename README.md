@@ -144,5 +144,29 @@ Running... (results stream in as instances finish; order is by completion, not b
 right after building Cbc. See `Cbc/test/run-mip-sanity-tests` and
 `Cbc/test/cbc_validate_sol.cpp` for the orchestrator/validator implementation.
 
+### Checking for regressions — `compare-results`
+
+Every `./test` run saves a per-instance results table (tab-separated:
+`instance status elapsed_s nodes gap_pct is_optimal obj bound`) to
+`Cbc/test/sanity-results/results.tsv` by default; pass `--results-tsv=PATH`
+to save it elsewhere. When developing a solver change, save a baseline
+before and after your change, then diff the two with `./compare-results`
+(a symlink to `Cbc/test/compare-mip-sanity-results`):
+
+```sh
+./test --results-tsv=/tmp/baseline.tsv        # before the change
+# ...make solver changes, rebuild with ./build...
+./test --results-tsv=/tmp/after.tsv           # after the change
+./compare-results /tmp/baseline.tsv /tmp/after.tsv
+```
+
+It reports aggregate deltas (passed/failed/overtime/error counts, confirmed
+optimal count, average gap) and lists every per-instance regression (newly
+errored/overtime, newly failed validation, lost a confirmed optimum, or a
+wider gap) and improvement, then exits non-zero if any regression was found
+— so it's safe to use as a gate in a script. See
+`Cbc/test/compare-mip-sanity-results` for the full option list
+(`--gap-tol`, `--no-color`).
+
 See `AGENTS.md` for full documentation: build system details, branching
 convention, dependency-aware rebuild rules, and testing guidance.
