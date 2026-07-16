@@ -462,21 +462,28 @@ _project_extra_opts() {
       ;;
     Clp)
       if (( OPT_AMD )); then
-        [[ -n "$AMD_CFLAGS" ]] && _EXTRA_OPTS+=("--with-amd-cflags=${AMD_CFLAGS}")
-        [[ -n "$AMD_LFLAGS" ]] && _EXTRA_OPTS+=("--with-amd-lflags=${AMD_LFLAGS}")
+        if [[ -n "$AMD_CFLAGS" ]]; then _EXTRA_OPTS+=("--with-amd-cflags=${AMD_CFLAGS}"); fi
+        if [[ -n "$AMD_LFLAGS" ]]; then _EXTRA_OPTS+=("--with-amd-lflags=${AMD_LFLAGS}"); fi
       else
         _EXTRA_OPTS+=("--without-amd")
       fi
       ;;
     Cbc)
       if (( OPT_NAUTY )); then
-        [[ -n "$NAUTY_CFLAGS" ]] && _EXTRA_OPTS+=("--with-nauty-cflags=${NAUTY_CFLAGS}")
-        [[ -n "$NAUTY_LFLAGS" ]] && _EXTRA_OPTS+=("--with-nauty-lflags=${NAUTY_LFLAGS}")
+        if [[ -n "$NAUTY_CFLAGS" ]]; then _EXTRA_OPTS+=("--with-nauty-cflags=${NAUTY_CFLAGS}"); fi
+        if [[ -n "$NAUTY_LFLAGS" ]]; then _EXTRA_OPTS+=("--with-nauty-lflags=${NAUTY_LFLAGS}"); fi
       else
         _EXTRA_OPTS+=("--without-nauty")
       fi
       ;;
   esac
+  # Always return success: with `set -e`, a bare `[[ cond ]] && cmd` as the
+  # function's last-executed statement would otherwise make this function
+  # (and thus the whole script) exit with the `[[ ]]`'s failure status
+  # whenever cond is false (e.g. AMD_LFLAGS/NAUTY_LFLAGS empty because the
+  # dependency was found via a pkg-config module that needs no explicit
+  # flags) — silently aborting `config` right before running `./configure`.
+  return 0
 }
 
 # ── Compiler / flag assembly ─────────────────────────────────────────────────
