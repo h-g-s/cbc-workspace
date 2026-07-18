@@ -363,6 +363,29 @@ stack, unless the change is in a lower layer (`CoinUtils`, `Osi`, `Clp`) that co
 affect everything downstream — in that case re-test all downstream projects too
 (including Cbc's `./test`).
 
+## Code Formatting
+
+`Cbc` (only — no other submodule currently has one) ships a `.clang-format`
+file at its root (`Cbc/.clang-format`, WebKit-derived: 2-space indent, no
+column limit, `SpacesInAngles: Always` so template args are written
+`std::vector< std::pair< std::string, double > >`, etc.). This is the
+project's canonical style, previously applied wholesale in commit
+`8b713420` ("apply the formatting available in .clang-format for this
+repository").
+
+> ⚠️ **After any refactor that touches `Cbc/src/CbcSolver*` (or adds new
+> files there), run `clang-format -i` over every changed file before
+> committing** — manual edits/refactors drift from the config (missing
+> angle-bracket spaces, inconsistent brace/indent style) and this has
+> caused real inconsistency in the past. Example:
+> ```sh
+> cd Cbc
+> clang-format -i src/CbcSolver.cpp src/CbcSolver.hpp src/CbcSolverHeuristics.cpp ...
+> ```
+> Formatting-only changes should be committed separately from functional
+> changes, and validated with a rebuild + a quick `./test` subset (e.g.
+> `./test 'bpc_*' 'kna*'`) to confirm the reformat didn't alter behavior.
+
 ## Related Work
 
 This workspace complements — but is independent from — `h-g-s/mipster`, a separate
