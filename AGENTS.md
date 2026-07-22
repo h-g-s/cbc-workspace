@@ -315,6 +315,34 @@ How it works, per instance:
 Runs automatically in CI (`.github/workflows/sanity-tests.yml` in Cbc) on
 every push/PR to `next`.
 
+### Testing the C interface directly — `mip-c-solve`
+
+`Cbc/test/mip-c-solve.cpp` (built via `Cbc/test/Makefile.am`, binary
+`Cbc/test/mip-c-solve`) drives a MIP solve **purely through Cbc's C API**
+(`Cbc_C_Interface.h` — `Cbc_newModel`/`Cbc_readMps`/`Cbc_readLp`,
+`Cbc_setMaximumSeconds`/`Cbc_setMaximumNodes`, `Cbc_solve`, then
+`Cbc_status`/`Cbc_isProvenOptimal`/`Cbc_getObjValue`/`Cbc_bestSolution`/
+`Cbc_savedSolution`/...), so it doubles as a quick way to confirm the C
+interface behaves the same as the `cbc` command line for a given instance.
+It reports the whole solution pool's feasibility/objective consistency and,
+when a best-known reference is available, cross-checks optimality claims
+against it. Two invocation forms:
+
+```sh
+# Generic form — any MPS/MPS.gz/LP file, explicit limits, no lookup:
+Cbc/test/mip-c-solve <instanceFileName> <timeLimit> <nodesLimit>
+# e.g. mimicking `cbc file.mps.gz -sec 30 -maxNodes 5000 -solve`:
+Cbc/test/mip-c-solve myinstance.mps.gz 30 5000
+
+# mip-sanity-data instance-name form — applies limits.tsv/bks.tsv automatically:
+Cbc/test/mip-c-solve 10teams
+```
+
+`nodesLimit` of `0` means unlimited. See `mip-c-solve --help` for the full
+option list (`--threads`, `--log-level`, `--verbose`, `--expected-status`,
+`--expected-obj`, `--data-dir`, ...). Exit code `0` = OK, `1` = a
+feasibility/objective/optimality mismatch was found, `2` = usage/file error.
+
 ### Checking for regressions/improvements — `./compare-results`
 
 `./test` always saves a per-instance results table to a TSV file — default
