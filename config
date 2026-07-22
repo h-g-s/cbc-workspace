@@ -517,7 +517,17 @@ build_flags() {
   case "$OPT_ARCH" in
     generic) : ;;
     native)  cflags+=" -march=native -mtune=native" ;;
-    *)       cflags+=" -march=${OPT_ARCH} -mtune=${OPT_ARCH}" ;;
+    *)
+      # aarch64 named CPU presets (cortex-a72, neoverse-n1, ...) are only
+      # accepted by GCC/Clang via -mcpu=; -march=/-mtune= there only take
+      # ISA-level names (armv8.2-a, ...), unlike x86_64 where -march=<preset>
+      # is correct (sandybridge, haswell, ...).
+      if [[ "$ARCH" == "aarch64" ]]; then
+        cflags+=" -mcpu=${OPT_ARCH}"
+      else
+        cflags+=" -march=${OPT_ARCH} -mtune=${OPT_ARCH}"
+      fi
+      ;;
   esac
 
   # -ffp-contract=off is ALWAYS added, regardless of --arch, for reproducible
