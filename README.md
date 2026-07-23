@@ -168,5 +168,20 @@ wider gap) and improvement, then exits non-zero if any regression was found
 `Cbc/test/compare-mip-sanity-results` for the full option list
 (`--gap-tol`, `--no-color`).
 
+## `fetch-ci-build`
+
+```sh
+./fetch-ci-build                       # trigger a CI build + install to ~/prog/cbc-ci
+./fetch-ci-build --no-trigger          # skip triggering; use the latest existing run
+./fetch-ci-build --prefix=/tmp/cbc-ci  # install elsewhere
+```
+
+Triggers `coin-or/Cbc`'s "Next branch release builds" workflow (which itself
+builds via this repo's `config`/`package` scripts), waits only for the job
+matching the local OS/architecture, downloads that platform's relocatable
+artifact, and installs it — so tests can run against an "official" CI-built
+binary instead of a local build. Requires the `gh` CLI (authenticated) and
+`jq`. Run `./fetch-ci-build --help` for the full option list.
+
 See `AGENTS.md` for full documentation: build system details, branching
 convention, dependency-aware rebuild rules, and testing guidance.

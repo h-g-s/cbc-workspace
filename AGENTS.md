@@ -391,6 +391,35 @@ stack, unless the change is in a lower layer (`CoinUtils`, `Osi`, `Clp`) that co
 affect everything downstream — in that case re-test all downstream projects too
 (including Cbc's `./test`).
 
+### Fetching "official" CI builds — `./fetch-ci-build`
+
+`coin-or/Cbc`'s `next-release.yml` GitHub Actions workflow ("Next branch
+release builds") builds relocatable `next`-branch binaries for 5 platforms
+(Linux x86_64/aarch64, macOS arm64/x86_64, Windows x86_64) using **this
+repo's own `config`/`package` scripts** (cloned at ref `main` inside the
+workflow), so it's a convenient way to test against an "official",
+independently-built binary — e.g. to confirm a `config`/`package` change
+behaves the same in CI as it did locally, or to sanity-check a change without
+doing a full local build.
+
+```sh
+./fetch-ci-build                       # trigger + wait + install to ~/prog/cbc-ci
+./fetch-ci-build --prefix=/tmp/cbc-ci  # install elsewhere
+./fetch-ci-build --no-trigger          # skip triggering; use the latest existing run
+./fetch-ci-build --run-id=12345678     # fetch a specific already-completed run
+./fetch-ci-build --dry-run             # show what would happen, do nothing
+```
+
+It: (a) triggers `next-release.yml` via `gh workflow run` (`workflow_dispatch`)
+on `coin-or/Cbc@next`; (b) detects the local machine's OS/architecture and
+polls **only the matching job** (not the full 5-platform matrix, so it
+doesn't block on the slowest platform) until it completes; (c) downloads that
+platform's artifact and installs it into `--prefix` (default `~/prog/cbc-ci`,
+replaced wholesale on each run), recording provenance (run ID/URL, commit SHA,
+fetch timestamp) in `<prefix>/.cbc-ci-build.info`. Requires `gh` (authenticated)
+and `jq`. See `./fetch-ci-build --help` for the full option list
+(`--repo`, `--workflow`, `--ref`, `--poll-interval`, `--timeout`, `--keep-tmp`).
+
 ## Code Formatting
 
 `Cbc` (only — no other submodule currently has one) ships a `.clang-format`

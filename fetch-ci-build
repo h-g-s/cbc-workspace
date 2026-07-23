@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+# ══════════════════════════════════════════════════════════════════════════════
+#  fetch-ci-build  ─  Trigger + fetch an "official" Cbc `next` CI build
+#
+#  Triggers coin-or/Cbc's "Next branch release builds" GitHub Actions workflow
+#  (.github/workflows/next-release.yml — builds via this repo's own `config`/
+#  `package` scripts at ref `main`), waits only for the job matching the local
+#  machine's OS/architecture (not the whole 5-platform matrix), downloads that
+#  platform's relocatable artifact, and installs it into a prefix — so tests
+#  can be run against the "official" CI-built binaries rather than a local
+#  build, e.g. to confirm a `config`/`package` change behaves the same way in
+#  CI as it did locally.
+#
+#  Usage:
+#    ./fetch-ci-build [OPTIONS]
+#
+#  Options:
+#    --repo=OWNER/REPO      GitHub repo to trigger/fetch from  [default: coin-or/Cbc]
+#    --workflow=FILE        Workflow file name                 [default: next-release.yml]
+#    --ref=BRANCH           Branch to build                    [default: next]
+#    --prefix=PATH          Install destination (replaced)     [default: ~/prog/cbc-ci]
+#    --run-id=N             Skip triggering; use this existing run ID
+#    --no-trigger           Skip triggering; use the latest existing run for --ref
+#    --poll-interval=SEC    Seconds between job-status polls   [default: 30]
+#    --timeout=SEC          Max seconds to wait for the job     [default: 2400]
+#    --keep-tmp             Don't delete the temporary download/extract dir
+#    --dry-run              Print what would happen, do nothing
+#    --help, -h             Show this help
+#
+#  Requires: gh (authenticated), jq, tar (+ unzip if fetching a Windows build).
+# ══════════════════════════════════════════════════════════════════════════════
+set -euo pipefail
+
+REPO="coin-or/Cbc"
+WORKFLOW="next-release.yml"
+REF="next"
+PREFIX="$HOME/prog/cbc-ci"
+RUN_ID=""
+TRIGGER=1
+POLL_INTERVAL=30
+TIMEOUT=2400
+KEEP_TMP=0
+DRY_RUN=0
+
+if [[ -t 1 ]]; then
+  BOLD=$'\e[1m'; RESET=$'\e[0m'
+  RED=$'\e[31m'; GREEN=$'\e[32m'; YELLOW=$'\e[33m'; CYAN=$'\e[36m'
+else
+  BOLD=''; RESET=''; RED=''; GREEN=''; YELLOW=''; CYAN=''
+fi
+
+for arg in "$@"; do
+  case "$arg" in
+    --repo=*)           REPO="${arg#*=}" ;;
+    --workflow=*)       WORKFLOW="${arg#*=}" ;;
+    --ref=*)            REF="${arg#*=}" ;;
+    --prefix=*)         PREFIX="${arg#*=}" ;;
+    --run-id=*)         RUN_ID="${arg#*=}"; TRIGGER=0 ;;
+    --no-trigger)       TRIGGER=0 ;;
+    --poll-interval=*)  POLL_INTERVAL="${arg#*=}" ;;
+    --timeout=*)        TIMEOUT="${arg#*=}" ;;
+    --keep-tmp)         KEEP_TMP=1 ;;
+    --dry-run)          DRY_RUN=1 ;;
+    -h|--help)          sed -n '2,29p' "$0"; exit 0 ;;
+    *) echo "Unknown option: $arg" >&2; exit 1 ;;
+  esac
+done
+
+command -v gh  >/dev/null 2>&1 || { echo "error: gh (GitHub CLI) is required" >&2; exit 1; }
+command -v jq  >/dev/null 2>&1 || { echo "error: jq is required" >&2; exit 1; }
+command -v tar >/dev/null 2>&1 || { echo "error: tar is required" >&2; exit 1; }
+
+# ── Detect local platform -> matching artifact name / job name / archive ext ─
+OS="$(uname -s)"
+MARCH="$(uname -m)"
+[[ "$MARCH" == "aarch64" || "$MARCH" == "arm64" ]] || true  # normalized per-branch below
+
+case "$OS" in
+  Linux)
+    case "$MARCH" in
+      x86_64)          ARTIFACT="cbc-linux-x86_64-next";  JOB_MATCH="Linux x86_64";  EXT="tar.gz" ;;
+      aarch64)         ARTIFACT="cbc-linux-aarch64-next"; JOB_MATCH="Linux aarch64"; EXT="tar.gz" ;;
+      *) echo "error: unsupported Linux architecture: $MARCH" >&2; exit 1 ;;
+    esac
+    ;;
+  Darwin)
+    case "$MARCH" in
+      arm64)           ARTIFACT="cbc-macos-arm64-next";   JOB_MATCH="macOS arm64";   EXT="tar.gz" ;;
+      x86_64)          ARTIFACT="cbc-macos-x86_64-next";  JOB_MATCH="macOS x86_64";  EXT="tar.gz" ;;
+      *) echo "error: unsupported macOS architecture: $MARCH" >&2; exit 1 ;;
+    esac
+    ;;
+  MINGW*|MSYS*|CYGWIN*)
+    ARTIFACT="cbc-windows-x86_64-next"; JOB_MATCH="Windows x86_64"; EXT="zip"
+    command -v unzip >/dev/null 2>&1 || { echo "error: unzip is required for Windows artifacts" >&2; exit 1; }
+    ;;
+  *)
+    echo "error: unsupported OS: $OS" >&2; exit 1 ;;
+esac
+
+echo "${BOLD}Platform:${RESET} $OS/$MARCH  ->  artifact '${CYAN}$ARTIFACT${RESET}' (job: '$JOB_MATCH')"
+echo "${BOLD}Source:${RESET}   $REPO@$REF, workflow '$WORKFLOW'"
+echo "${BOLD}Install:${RESET}  $PREFIX"
+echo
+
+if (( DRY_RUN )); then
+  echo "[dry-run] Would trigger='$TRIGGER', run-id='${RUN_ID:-<new>}', poll every ${POLL_INTERVAL}s (timeout ${TIMEOUT}s),"
+  echo "[dry-run] download '$ARTIFACT', extract, and install to '$PREFIX'."
+  exit 0
+fi
+
+# ── a) trigger a new build remotely ──────────────────────────────────────────
+if (( TRIGGER )); then
+  echo "Triggering '$WORKFLOW' on $REPO@$REF ..."
+  TRIGGER_TS="$(date -u +%Y-%m-%dT%H:%M:%S)"
+  gh workflow run "$WORKFLOW" --repo "$REPO" --ref "$REF"
+
+  echo -n "Waiting for the new run to register on GitHub"
+  for _ in $(seq 1 24); do
+    echo -n "."
+    RUN_ID="$(gh run list --repo "$REPO" --workflow="$WORKFLOW" --branch="$REF" \
+                --event=workflow_dispatch --limit=5 \
+                --json databaseId,createdAt \
+                -q "[.[] | select(.createdAt >= \"$TRIGGER_TS\")] | sort_by(.createdAt) | last | .databaseId // empty" 2>/dev/null || true)"
+    [[ -n "$RUN_ID" ]] && break
+    sleep 5
+  done
+  echo
+  [[ -n "$RUN_ID" ]] || { echo "error: could not find the newly triggered run" >&2; exit 1; }
+  echo "${GREEN}Run started:${RESET} https://github.com/$REPO/actions/runs/$RUN_ID"
+elif [[ -z "$RUN_ID" ]]; then
+  echo "No --run-id given; using the latest run of '$WORKFLOW' on $REPO@$REF ..."
+  RUN_ID="$(gh run list --repo "$REPO" --workflow="$WORKFLOW" --branch="$REF" --limit=1 --json databaseId -q '.[0].databaseId')"
+  [[ -n "$RUN_ID" ]] || { echo "error: no existing run found" >&2; exit 1; }
+  echo "${GREEN}Using run:${RESET} https://github.com/$REPO/actions/runs/$RUN_ID"
+fi
+
+# ── b) monitor + download the build for our architecture ────────────────────
+# Only the job matching our OS/arch is awaited — the workflow builds 5
+# platforms in parallel, and we don't want to block on the slowest one
+# (typically macOS/Windows) when we only need one artifact.
+echo "Waiting for job '$JOB_MATCH' to complete (poll every ${POLL_INTERVAL}s, timeout ${TIMEOUT}s)..."
+ELAPSED=0
+JOB_STATUS=""
+JOB_CONCLUSION=""
+while true; do
+  JOB_LINE="$(gh run view "$RUN_ID" --repo "$REPO" --json jobs \
+                -q ".jobs[] | select(.name | startswith(\"$JOB_MATCH\")) | \"\(.status)\t\(.conclusion)\"" 2>/dev/null || true)"
+  JOB_STATUS="$(cut -f1 <<<"$JOB_LINE")"
+  JOB_CONCLUSION="$(cut -f2 <<<"$JOB_LINE")"
+  echo "  [$(date +%H:%M:%S)] status=${JOB_STATUS:-unknown}${JOB_CONCLUSION:+ conclusion=$JOB_CONCLUSION}"
+  [[ "$JOB_STATUS" == "completed" ]] && break
+  if (( ELAPSED >= TIMEOUT )); then
+    echo "${RED}error:${RESET} timed out after ${TIMEOUT}s waiting for job '$JOB_MATCH'" >&2
+    echo "See: https://github.com/$REPO/actions/runs/$RUN_ID" >&2
+    exit 1
+  fi
+  sleep "$POLL_INTERVAL"
+  ELAPSED=$(( ELAPSED + POLL_INTERVAL ))
+done
+
+if [[ "$JOB_CONCLUSION" != "success" ]]; then
+  echo "${RED}error:${RESET} job '$JOB_MATCH' finished with conclusion '$JOB_CONCLUSION' (expected success)" >&2
+  echo "See: https://github.com/$REPO/actions/runs/$RUN_ID" >&2
+  exit 1
+fi
+echo "${GREEN}Job succeeded.${RESET}"
+
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cbc-ci-build.XXXXXX")"
+cleanup() { (( KEEP_TMP )) || rm -rf "$TMP_DIR"; }
+trap cleanup EXIT
+
+echo "Downloading artifact '$ARTIFACT' ..."
+gh run download "$RUN_ID" --repo "$REPO" --name "$ARTIFACT" --dir "$TMP_DIR"
+
+ARCHIVE="$(find "$TMP_DIR" -maxdepth 1 -name "*.${EXT}" | head -1)"
+[[ -n "$ARCHIVE" ]] || { echo "${RED}error:${RESET} no .${EXT} archive found in downloaded artifact" >&2; exit 1; }
+
+# ── c) install into $PREFIX ──────────────────────────────────────────────────
+EXTRACT_DIR="$TMP_DIR/extracted"
+mkdir -p "$EXTRACT_DIR"
+case "$EXT" in
+  tar.gz) tar xzf "$ARCHIVE" -C "$EXTRACT_DIR" ;;
+  zip)    unzip -q -o "$ARCHIVE" -d "$EXTRACT_DIR" ;;
+esac
+
+# Archives contain a single top-level dir (e.g. cbc-linux-aarch64-next/...);
+# install its *contents* directly into $PREFIX rather than nesting one level.
+INNER_DIR="$(find "$EXTRACT_DIR" -mindepth 1 -maxdepth 1 -type d | head -1)"
+[[ -n "$INNER_DIR" ]] || INNER_DIR="$EXTRACT_DIR"
+
+echo "Installing to $PREFIX ..."
+rm -rf "$PREFIX"
+mkdir -p "$(dirname "$PREFIX")"
+mv "$INNER_DIR" "$PREFIX"
+
+# Record provenance so it's obvious later which CI run/commit this came from.
+HEAD_SHA="$(gh run view "$RUN_ID" --repo "$REPO" --json headSha -q '.headSha' 2>/dev/null || echo unknown)"
+cat > "$PREFIX/.cbc-ci-build.info" <<EOF
+repo=$REPO
+workflow=$WORKFLOW
+ref=$REF
+run_id=$RUN_ID
+run_url=https://github.com/$REPO/actions/runs/$RUN_ID
+head_sha=$HEAD_SHA
+artifact=$ARTIFACT
+fetched_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+
+echo
+echo "${GREEN}${BOLD}Done.${RESET} Installed '$ARTIFACT' (commit ${HEAD_SHA:0:8}) to $PREFIX"
+if [[ -x "$PREFIX/bin/cbc" ]]; then
+  # `head` closing the pipe early can SIGPIPE `cbc`; don't let that (harmless)
+  # non-zero status fail the script under `set -o pipefail`.
+  { "$PREFIX/bin/cbc" -? 2>&1 | head -2 | sed 's/^/  /'; } || true
+fi
