@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# update — refresh cbc-workspace and all 5 COIN-OR submodules from upstream.
+#
+# Pulls the superproject's own branch (fast-forward only), then for every
+# submodule (CoinUtils, Osi, Clp, Cgl, Cbc) checks out its `next` branch
+# (creating a local branch tracking origin/next the first time, since a
+# fresh `git submodule update` leaves each submodule in detached HEAD) and
+# fast-forwards it to origin/next — matching this repo's branching
+# convention (always work on `next`, never `master`/`stable`; see AGENTS.md).
+#
+# After all 5 submodules are refreshed, the superproject's submodule
+# pointers (CoinUtils/Osi/Clp/Cgl/Cbc gitlinks) will show as "modified" if
+# any upstream moved. This script leaves that for you to review/commit
+# (`git add <Project> && git commit`), unless --commit is given, in which
+# case it stages and commits the pointer bumps itself (one commit per
+# changed submodule, "Bump <Project> to latest next", matching this repo's
+# existing commit history).
+#
+# Usage:
+#   ./update                 # pull workspace + all submodules' next branches
+#   ./update CoinUtils Cbc    # restrict to these submodules only
+#   ./update --commit         # also commit the resulting submodule pointer bumps
+#   ./update --dry-run        # show what would be done, change nothing
+#   -h, --help                Show this help message and exit
+set -euo pipefail
+
+WORKSPACE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ALL_REPOS=(CoinUtils Osi Clp Cgl Cbc)
+
+COMMIT=0
+DRY_RUN=0
+REPOS_ARG=()
+
+show_help() {
+  sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+for arg in "$@"; do
+  case "$arg" in
+    --commit)   COMMIT=1 ;;
+    --dry-run)  DRY_RUN=1 ;;
+    -h|--help)  show_help; exit 0 ;;
+    -*) echo "Unknown option: $arg" >&2; exit 1 ;;
+    *)  REPOS_ARG+=("$arg") ;;
+  esac
+done
+
+REPOS=("${ALL_REPOS[@]}")
+if [[ ${#REPOS_ARG[@]} -gt 0 ]]; then
+  REPOS=()
+  for r in "${REPOS_ARG[@]}"; do
+    found=0
+    for known in "${ALL_REPOS[@]}"; do
+      [[ "$r" == "$known" ]] && { REPOS+=("$r"); found=1; break; }
+    done
+    [[ $found -eq 1 ]] || { echo "Unknown submodule: $r (expected one of: ${ALL_REPOS[*]})" >&2; exit 1; }
+  done
+fi
+
+run() {
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "DRY-RUN: $*"
+  else
+    "$@"
+  fi
+}
+
+# ── 1. Update the superproject itself ────────────────────────────────────────
+cd "$WORKSPACE_ROOT"
+branch="$(git branch --show-current)"
+if [[ -z "$branch" ]]; then
+  echo "Error: cbc-workspace is in detached HEAD; check out a branch (e.g. main) first." >&2
+  exit 1
+fi
+echo "==> cbc-workspace ($branch): fetching + fast-forwarding..."
+run git fetch origin "$branch"
+run git merge --ff-only "origin/$branch"
+echo ""
+
+# ── 2. Update each requested submodule's `next` branch ───────────────────────
+declare -A MOVED=()
+for repo in "${REPOS[@]}"; do
+  echo "==> $repo: fetching origin/next..."
+  (
+    cd "$WORKSPACE_ROOT/$repo"
+    run git fetch origin next
+
+    before="$(git rev-parse HEAD)"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      after="$(git rev-parse origin/next)"
+      echo "DRY-RUN: checkout+fast-forward next to origin/next ($before -> $after)"
+    else
+      if git show-ref --verify --quiet refs/heads/next; then
+        git checkout next
+      else
+        git checkout -b next --track origin/next
+      fi
+      git merge --ff-only origin/next
+      after="$(git rev-parse HEAD)"
+      if [[ "$before" != "$after" ]]; then
+        echo "    $repo: $before -> $after"
+      else
+        echo "    $repo: already up to date ($before)"
+      fi
+    fi
+  )
+  echo ""
+done
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  echo "Dry run complete; nothing was changed."
+  exit 0
+fi
+
+# ── 3. Report / commit superproject submodule-pointer changes ────────────────
+cd "$WORKSPACE_ROOT"
+CHANGED_REPOS=()
+for repo in "${REPOS[@]}"; do
+  if ! git diff --quiet -- "$repo"; then
+    CHANGED_REPOS+=("$repo")
+  fi
+done
+
+if [[ ${#CHANGED_REPOS[@]} -eq 0 ]]; then
+  echo "==> All submodule pointers already up to date; nothing to commit."
+  exit 0
+fi
+
+echo "==> Submodule pointers moved: ${CHANGED_REPOS[*]}"
+if [[ "$COMMIT" -eq 1 ]]; then
+  for repo in "${CHANGED_REPOS[@]}"; do
+    git add "$repo"
+    git commit -m "Bump $repo to latest next"
+    echo "    committed: Bump $repo to latest next"
+  done
+else
+  echo "    Run with --commit to record these bumps, or:"
+  echo "      git add ${CHANGED_REPOS[*]} && git commit -m 'Bump ${CHANGED_REPOS[*]// / \/ } to latest next'"
+fi

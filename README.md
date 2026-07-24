@@ -168,6 +168,23 @@ wider gap) and improvement, then exits non-zero if any regression was found
 `Cbc/test/compare-mip-sanity-results` for the full option list
 (`--gap-tol`, `--no-color`).
 
+## `update`
+
+```sh
+./update                 # pull cbc-workspace + fast-forward all 5 submodules' next branches
+./update CoinUtils Cbc    # restrict to specific submodules
+./update --commit         # also commit the resulting submodule pointer bumps
+```
+
+Fetches and fast-forwards the superproject's own branch, then for every
+submodule checks out (or creates) a local `next` branch tracking
+`origin/next` and fast-forwards it — the same branching convention described
+in `AGENTS.md`. Submodule pointer changes are reported but left uncommitted
+unless `--commit` is given, matching this repo's `git add <Project> && git
+commit -m "Bump <Project> to latest next"` convention. Run
+`./update --help` for the full option list (`--dry-run`, per-submodule
+filtering).
+
 ## `fetch-ci-build`
 
 ```sh
