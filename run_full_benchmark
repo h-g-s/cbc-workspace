@@ -39,6 +39,9 @@
 #   TIMEOUT           reached the time limit; CBC exited on its own
 #   TIMEOUT(no_sol)   timed out without finding any feasible solution
 #   TIMEOUT(gap=X%)   timed out with a feasible solution, gap X%
+#   MEMLIMIT          reached the -maxMem memory limit; CBC exited on its own
+#   MEMLIMIT(no_sol)  hit the memory limit without finding any feasible solution
+#   MEMLIMIT(gap=X%)  hit the memory limit with a feasible solution, gap X%
 #   OVERTIME          CBC ignored its own time limit and was killed after the overtime grace
 #   CRASH(exit=N)     non-zero exit, no sanitizer markers detected
 #   ASAN_ERROR        AddressSanitizer error found in log
@@ -424,8 +427,8 @@ run_instance() {
   end_ts=$(date +%s.%N)
   elapsed=$(awk -v a="$start_ts" -v b="$end_ts" 'BEGIN{printf "%d", b-a}')
 
-  # ── Extract obj/timed_out/no_feasible_solution/proven_infeasible ───────────
-  local obj="" timed_out=0 no_feasible_solution=0 proven_infeasible=0
+  # ── Extract obj/timed_out/mem_limited/no_feasible_solution/proven_infeasible ─
+  local obj="" timed_out=0 mem_limited=0 no_feasible_solution=0 proven_infeasible=0
   if [[ "$CBC_STATS_MODE" == "writeStat" && -f "$csv_statsfile" ]]; then
     # Look up "result"/"objective" columns by header name rather than a fixed
     # index — this workspace's -writeStat CSV (upstream Cbc) has a different
@@ -439,6 +442,7 @@ run_instance() {
     _csv_obj=$(awk -F',' -v c="${_obj_col:-6}" '{print $c}' <<< "$_csv_data")
     [[ "$_csv_result" == *"time limit"* ]] && timed_out=1
     [[ "$_csv_result" == *"node limit"* ]] && timed_out=1
+    [[ "$_csv_result" == *"memory limit"* ]] && mem_limited=1
     if [[ "$_csv_result" == "Problem proven infeasible" || "$_csv_result" == "Linear relaxation infeasible" ]]; then
       proven_infeasible=1
     fi
@@ -454,6 +458,7 @@ run_instance() {
     obj=$(grep -iP '^optimal\b.*\bobjective value\b' "$logfile" | grep -oP '[-\d.eE+]+$' | tail -1 || true)
     [[ -z "$obj" ]] && obj=$(grep -iP '^objective value[: ]' "$logfile" | grep -oP '[-\d.eE+]+$' | tail -1 || true)
     grep -qi "time limit\|stopped on time\|node limit" "$logfile" 2>/dev/null && timed_out=1
+    grep -qi "stopped on memory limit\|exiting on maximum memory" "$logfile" 2>/dev/null && mem_limited=1
     grep -qi '^No feasible solution found' "$logfile" 2>/dev/null && no_feasible_solution=1
     grep -qiP "Result - (Problem proven infeasible|Linear relaxation infeasible)|Problem is infeasible|infeasibility proved" "$logfile" 2>/dev/null && proven_infeasible=1
     if [[ -n "$obj" ]] && awk -v x="$obj" 'BEGIN { exit (x >= 1e49 || x <= -1e49) ? 0 : 1 }'; then obj=""; fi
@@ -499,9 +504,9 @@ run_instance() {
   local ref_kind="optimal"
   [[ "$exp_status" == "best_known" ]] && ref_kind="best_known"
 
-  # ── Gap for timeout cases with a feasible solution ─────────────────────────
+  # ── Gap for timeout/memory-limit cases with a feasible solution ────────────
   local cbc_gap="-"
-  if [[ $timed_out -eq 1 && -n "$obj" ]]; then
+  if [[ ( $timed_out -eq 1 || $mem_limited -eq 1 ) && -n "$obj" ]]; then
     local raw_gap
     raw_gap=$(grep -oP '^Gap:\s+\K[-\d.eE+]+' "$logfile" | tail -1 || true)
     if [[ -n "$raw_gap" ]]; then
@@ -532,8 +537,12 @@ run_instance() {
       status="INFEASIBLE_WRONG"
     fi
   elif [[ -z "$obj" ]]; then
-    if [[ $timed_out -eq 1 ]]; then status="TIMEOUT(no_sol)"; else status="NO_SOLUTION"; fi
+    if [[ $mem_limited -eq 1 ]]; then status="MEMLIMIT(no_sol)";
+    elif [[ $timed_out -eq 1 ]]; then status="TIMEOUT(no_sol)";
+    else status="NO_SOLUTION"; fi
     cbc_gap="200%"
+  elif [[ $mem_limited -eq 1 ]]; then
+    if [[ "$cbc_gap" != "-" ]]; then status="MEMLIMIT(gap=${cbc_gap})"; else status="MEMLIMIT"; fi
   elif [[ $timed_out -eq 1 ]]; then
     if [[ "$cbc_gap" != "-" ]]; then status="TIMEOUT(gap=${cbc_gap})"; else status="TIMEOUT"; fi
   elif [[ -n "$exp" ]]; then
@@ -578,7 +587,7 @@ run_instance() {
   local icon sc
   case "$status" in
     SOLVED|SOLVED\(*)      icon="✓"; sc="$C_BGREEN"  ;;
-    TIMEOUT*)              icon="⚠"; sc="$C_YELLOW"  ;;
+    TIMEOUT*|MEMLIMIT*)    icon="⚠"; sc="$C_YELLOW"  ;;
     NO_SOLUTION|OVERTIME)  icon="⚠"; sc="$C_BYELLOW" ;;
     *)                     icon="✗"; sc="$C_BRED"    ;;
   esac
@@ -693,7 +702,7 @@ printf "%-42s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
   "instance" "status" "objective" "dual_bound" "expected" "elapsed_s" "threads" "gap_field" \
   "solution_found" "proven_infeasible" "timed_out" > "$SUMMARY"
 
-SOLVED_COUNT=0; TIMEOUT_COUNT=0; NO_SOLUTION_COUNT=0; FAIL=0; OVERTIME_COUNT=0
+SOLVED_COUNT=0; TIMEOUT_COUNT=0; MEMLIMIT_COUNT=0; NO_SOLUTION_COUNT=0; FAIL=0; OVERTIME_COUNT=0
 FAILED_NAMES=()
 
 for name in "${INSTANCES[@]}"; do
@@ -711,6 +720,8 @@ for name in "${INSTANCES[@]}"; do
     SOLVED_COUNT=$((SOLVED_COUNT+1))
   elif [[ "$status" == TIMEOUT* ]]; then
     TIMEOUT_COUNT=$((TIMEOUT_COUNT+1))
+  elif [[ "$status" == MEMLIMIT* ]]; then
+    MEMLIMIT_COUNT=$((MEMLIMIT_COUNT+1))
   elif [[ "$status" == "NO_SOLUTION" ]]; then
     NO_SOLUTION_COUNT=$((NO_SOLUTION_COUNT+1))
   else
@@ -729,8 +740,8 @@ fi
 {
   echo ""
   echo "═══════════════════════════════════════════════════"
-  printf "  Results: %d/%d solved/proved, %d timed out, %d no-solution, %d failed" \
-    "$SOLVED_COUNT" "$TOTAL" "$TIMEOUT_COUNT" "$NO_SOLUTION_COUNT" "$FAIL"
+  printf "  Results: %d/%d solved/proved, %d timed out, %d mem-limited, %d no-solution, %d failed" \
+    "$SOLVED_COUNT" "$TOTAL" "$TIMEOUT_COUNT" "$MEMLIMIT_COUNT" "$NO_SOLUTION_COUNT" "$FAIL"
   [[ $OVERTIME_COUNT -gt 0 ]] && printf "  (%d OVERTIME — ignored time limit)" "$OVERTIME_COUNT"
   echo ""
   echo "  Finished: $(date)"
