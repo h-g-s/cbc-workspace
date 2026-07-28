@@ -125,18 +125,29 @@ for repo in "${REPOS[@]}"; do
   dir="$WORKSPACE_ROOT/$repo"
   [[ -d "$dir" ]] || continue
 
+  # Work around a known TSan/aarch64 limitation: on kernels with high mmap
+  # ASLR entropy, ThreadSanitizer aborts instrumented binaries with "FATAL:
+  # ThreadSanitizer: unexpected memory mapping ...". Detect a TSan build from
+  # this project's already-generated config.log and disable ASLR for the
+  # make invocations (matches the same workaround in ./config).
+  aslr_wrap=()
+  if [[ "$(uname -m)" == "aarch64" ]] && grep -q -- '-fsanitize=thread' "$dir/config.log" 2>/dev/null \
+      && command -v setarch >/dev/null 2>&1; then
+    aslr_wrap=(setarch aarch64 -R)
+  fi
+
   echo "=== [$repo] make clean ==="
   make -C "$dir" clean >/dev/null 2>&1 || true
 
   echo "=== [$repo] make -j$JOBS ==="
-  make -C "$dir" -j"$JOBS"
+  ${aslr_wrap[@]+"${aslr_wrap[@]}"} make -C "$dir" -j"$JOBS"
 
   # Always install immediately: downstream projects (Osi/Clp/Cgl/Cbc) discover
   # dependencies via the shared prefix's installed headers/libs/.pc files, not
   # the in-tree build output, so a built-but-not-installed project would leave
   # the next project in this same loop configured against stale artifacts.
   echo "=== [$repo] make install ==="
-  make -C "$dir" install
+  ${aslr_wrap[@]+"${aslr_wrap[@]}"} make -C "$dir" install
 done
 
 # ---- persist new state (only for repos actually built successfully) --------

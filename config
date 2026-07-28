@@ -215,6 +215,22 @@ validate_opts() {
   [[ "$ARCH" == "x86_64"  ]] || OPT_AVX2=0
 }
 
+# ── ASLR workaround for TSan on aarch64 ────────────────────────────────────────
+# On aarch64 kernels with high mmap ASLR entropy, ThreadSanitizer aborts any
+# instrumented binary (including configure's own conftest probes) with
+# "FATAL: ThreadSanitizer: unexpected memory mapping ..." because mmap
+# addresses land outside the fixed VA range TSan's shadow memory expects. This
+# is a known TSan/aarch64 limitation, not a cbc-workspace bug. Disabling ASLR
+# for the configure/build/install child processes via `setarch -R` avoids it.
+ASLR_WRAP=()
+detect_aslr_wrap() {
+  ASLR_WRAP=()
+  [[ "$OPT_SANITIZER" == "tsan" ]] || return 0
+  [[ "$ARCH" == "aarch64" ]] || return 0
+  command -v setarch >/dev/null 2>&1 || return 0
+  ASLR_WRAP=(setarch "$ARCH" -R)
+}
+
 # ── Derive install prefix if not set by user ──────────────────────────────────
 derive_prefix() {
   [[ -n "$OPT_PREFIX" ]] && return
@@ -952,7 +968,7 @@ _build_one() {
   local rc=0
   local tmplog
   tmplog="$(mktemp)"
-  make -C "$dir" -j"${OPT_JOBS}" >"$tmplog" 2>&1 || rc=$?
+  ${ASLR_WRAP[@]+"${ASLR_WRAP[@]}"} make -C "$dir" -j"${OPT_JOBS}" >"$tmplog" 2>&1 || rc=$?
   if (( rc )); then
     echo ""
     echo "${RED}        ✗  build failed (exit ${rc})${RESET}"
@@ -979,7 +995,7 @@ _install_one() {
   local rc=0
   local tmplog
   tmplog="$(mktemp)"
-  make -C "$dir" install -j"${OPT_JOBS}" >"$tmplog" 2>&1 || rc=$?
+  ${ASLR_WRAP[@]+"${ASLR_WRAP[@]}"} make -C "$dir" install -j"${OPT_JOBS}" >"$tmplog" 2>&1 || rc=$?
   if (( rc )); then
     echo ""
     echo "${RED}        ✗  install failed (exit ${rc})${RESET}"
@@ -1035,6 +1051,7 @@ run_configure() {
         (
           cd "$dir"
           ADD_CXXFLAGS="$FINAL_CXXFLAGS" CFLAGS="$FINAL_CFLAGS" LDFLAGS="$FINAL_LDFLAGS" \
+            ${ASLR_WRAP[@]+"${ASLR_WRAP[@]}"} \
             ./configure --prefix="$OPT_PREFIX" "${CONFIGURE_OPTS[@]}" ${_EXTRA_OPTS[@]+"${_EXTRA_OPTS[@]}"}
         ) >"$tmplog" 2>&1 || rc=$?
         if (( rc )); then
@@ -1090,6 +1107,7 @@ run_configure() {
     (
       cd "$dir"
       ADD_CXXFLAGS="$FINAL_CXXFLAGS" CFLAGS="$FINAL_CFLAGS" LDFLAGS="$FINAL_LDFLAGS" \
+        ${ASLR_WRAP[@]+"${ASLR_WRAP[@]}"} \
         ./configure --prefix="$OPT_PREFIX" "${CONFIGURE_OPTS[@]}" ${_EXTRA_OPTS[@]+"${_EXTRA_OPTS[@]}"}
     ) || rc=$?
     if (( rc )); then
@@ -1113,6 +1131,7 @@ main() {
   validate_opts
   derive_prefix
   detect_optional_deps
+  detect_aslr_wrap
 
   # Launch TUI when: no args given at all, or --interactive was passed
   if (( ! _ARGS_GIVEN )) || (( OPT_INTERACTIVE )); then

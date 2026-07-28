@@ -160,6 +160,20 @@ if [[ -z "$CBC_BIN" || ! -x "$CBC_BIN" ]]; then
 fi
 echo "==> Using cbc: $CBC_BIN"
 
+# ── ASLR workaround for TSan on aarch64 ─────────────────────────────────────
+# On aarch64 kernels with high mmap ASLR entropy, TSan-instrumented binaries
+# abort with "FATAL: ThreadSanitizer: unexpected memory mapping ..." because
+# mmap addresses land outside the fixed VA range TSan's shadow memory
+# expects. Detect a TSan build via its libtsan dependency and disable ASLR
+# for every cbc invocation (mirrors the same workaround in cbc-workspace's
+# ./config, ./build, and ./test).
+ASLR_WRAP=()
+if [[ "$(uname -m)" == "aarch64" ]] && command -v setarch >/dev/null 2>&1 \
+    && ldd "$CBC_BIN" 2>/dev/null | grep -q 'libtsan\.so'; then
+  ASLR_WRAP=(setarch aarch64 -R)
+  echo "==> Detected TSan build on aarch64 — running cbc under 'setarch -R' to avoid a known TSan ASLR limitation."
+fi
+
 # ── Locate/build the validator ────────────────────────────────────────────────
 VALIDATOR="$REPO_ROOT/Cbc/test/cbc_validate_sol"
 if [[ ! -x "$VALIDATOR" ]]; then
@@ -177,7 +191,7 @@ echo "==> Using validator: $VALIDATOR"
 
 # ── Detect -writeStat support ──────────────────────────────────────────────────
 CBC_STATS_MODE="none"
-if "$CBC_BIN" -? 2>&1 | grep -qi 'writeStat'; then
+if ${ASLR_WRAP[@]+"${ASLR_WRAP[@]}"} "$CBC_BIN" -? 2>&1 | grep -qi 'writeStat'; then
   CBC_STATS_MODE="writeStat"
 fi
 echo "==> Solver stats export: $([[ "$CBC_STATS_MODE" == writeStat ]] && echo writeStat || echo "unavailable; using log parsing only")"
@@ -237,9 +251,10 @@ if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then USE_COLOR=1; else USE_COLOR=0; fi
 VG_SUPPS_STR=$(IFS=:; echo "${VG_SUPPS[*]+"${VG_SUPPS[*]}"}")
 EXTRA_ENV_STR=$(printf '%s\n' "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}")
 CBC_EXTRA_OPTS_STR=$(printf '%s\n' "${CBC_EXTRA_OPTS[@]+"${CBC_EXTRA_OPTS[@]}"}")
+ASLR_WRAP_STR="${ASLR_WRAP[*]+"${ASLR_WRAP[*]}"}"
 
 export CBC_BIN VALIDATOR OUTDIR THREADS TIMELIMIT OVERTIME_GRACE INSTANCES_DIR MIPS_DIR BKS_FORMAT
-export VG_TOOL VG_SUPPS_STR EXTRA_ENV_STR CBC_EXTRA_OPTS_STR
+export VG_TOOL VG_SUPPS_STR EXTRA_ENV_STR CBC_EXTRA_OPTS_STR ASLR_WRAP_STR
 export REL_TOL ABS_TOL DRY_RUN USE_COLOR CBC_STATS_MODE
 
 # ── Helper: objective within tolerance of an exact reference ─────────────────
@@ -328,6 +343,10 @@ run_instance() {
   local validatelog="$OUTDIR/${name}.validate.log"
   rm -f "$csv_statsfile" "$solutionfile" "$logfile" "$errfile" "$vg_logfile" "$resultfile" "$validatelog"
 
+  # Reconstruct the ASLR-disabling wrapper array (see ASLR_WRAP_STR export above).
+  local aslr_wrap=()
+  [[ -n "$ASLR_WRAP_STR" ]] && read -ra aslr_wrap <<< "$ASLR_WRAP_STR"
+
   # ── suggested limits from limits.tsv (unless --timelimit overrides them) ────
   local node_limit=0 time_limit=120 hard_kill=180
   local limits_row
@@ -407,7 +426,7 @@ run_instance() {
   local thread_args=()
   [[ "$THREADS" != "1" ]] && thread_args=(-threads="${THREADS}")
 
-  local cmd=("${vg_cmd[@]}" "$CBC_BIN" "$mps" "${thread_args[@]}" "-seconds=${time_limit}" "${node_args[@]}")
+  local cmd=("${aslr_wrap[@]}" "${vg_cmd[@]}" "$CBC_BIN" "$mps" "${thread_args[@]}" "-seconds=${time_limit}" "${node_args[@]}")
   [[ ${#cbc_extra[@]} -gt 0 ]] && cmd+=("${cbc_extra[@]}")
   cmd+=("-solve")
   [[ "$CBC_STATS_MODE" == "writeStat" ]] && cmd+=("-writeStat" "$csv_statsfile")
@@ -499,7 +518,7 @@ run_instance() {
     fi
     if [[ -n "$exp" ]]; then val_args+=(--expected-obj "$exp"); fi
     set +e
-    "$VALIDATOR" "${val_args[@]}" "$mps" "$solutionfile" > "$validatelog" 2>&1
+    ${aslr_wrap[@]+"${aslr_wrap[@]}"} "$VALIDATOR" "${val_args[@]}" "$mps" "$solutionfile" > "$validatelog" 2>&1
     local validate_exit=$?
     set -e
     if [[ $validate_exit -eq 1 ]]; then
