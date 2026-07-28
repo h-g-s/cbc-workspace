@@ -399,7 +399,15 @@ run_instance() {
   local node_args=()
   [[ "$node_limit" != "0" ]] && node_args=(-maxNodes "$node_limit")
 
-  local cmd=("${vg_cmd[@]}" "$CBC_BIN" "$mps" "-threads=${THREADS}" "-seconds=${time_limit}" "${node_args[@]}")
+  # Omit -threads entirely when THREADS=1: that is CBC's plain sequential
+  # (non-threaded) default (threads=0), so passing "-threads=1" explicitly
+  # would needlessly switch on CBC's threaded B&B code path (real thread-pool
+  # setup + disables the fast-node-depth heuristic) instead of leaving it at
+  # the faster untouched default.
+  local thread_args=()
+  [[ "$THREADS" != "1" ]] && thread_args=(-threads="${THREADS}")
+
+  local cmd=("${vg_cmd[@]}" "$CBC_BIN" "$mps" "${thread_args[@]}" "-seconds=${time_limit}" "${node_args[@]}")
   [[ ${#cbc_extra[@]} -gt 0 ]] && cmd+=("${cbc_extra[@]}")
   cmd+=("-solve")
   [[ "$CBC_STATS_MODE" == "writeStat" ]] && cmd+=("-writeStat" "$csv_statsfile")
