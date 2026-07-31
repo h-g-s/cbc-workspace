@@ -324,7 +324,20 @@ detect_optional_deps() {
     LAPACK_WHAT="system LAPACK/BLAS"
     # No explicit lflags needed — CoinUtils' own configure auto-probes
     # lapack.pc/blas.pc via pkg-config.
-  elif ldconfig -p 2>/dev/null | grep -q 'liblapack\.so'; then
+  elif ldconfig -p 2>/dev/null | grep 'libopenblas\.so' >/dev/null; then
+    # Fedora's openblas-devel installs libopenblas.so (and versioned variants)
+    # but ships no openblas.pc, so the pkg-config probe above never fires.
+    # Fall back to linking it directly by name.
+    # NOTE: use plain `grep ... >/dev/null` rather than `grep -q` here — with
+    # `set -o pipefail` (in effect for this whole script), `grep -q` closes
+    # its stdin as soon as it finds a match, which can SIGPIPE the still-
+    # writing `ldconfig` upstream; pipefail then reports the pipeline as
+    # failed (128+SIGPIPE) even though grep matched. Letting grep consume
+    # all of ldconfig's output avoids that race.
+    LAPACK_AVAIL=1
+    LAPACK_LFLAGS="-lopenblas"
+    LAPACK_WHAT="system OpenBLAS"
+  elif ldconfig -p 2>/dev/null | grep 'liblapack\.so' >/dev/null; then
     LAPACK_AVAIL=1
     LAPACK_WHAT="system LAPACK/BLAS"
   fi
