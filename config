@@ -526,7 +526,14 @@ build_flags() {
   if [[ "$OPT_BUILD_MODE" == "opt" ]]; then
     cflags="-O3"
   else
-    cflags="-O1 -g"
+    # COIN-OR's generated `configure` defaults CXXFLAGS/CFLAGS to
+    # "-O2 -DNDEBUG $ADD_CXXFLAGS" whenever CXXFLAGS/CFLAGS aren't already
+    # set in the environment (see coin.m4's AC_COIN_CHECK_GNU_PACKAGES).
+    # Since this script only ever sets ADD_CXXFLAGS/ADD_CFLAGS (appended
+    # after that default), a plain "-O1 -g" debug build silently keeps
+    # -DNDEBUG from the default, disabling all assert()s. Explicitly add
+    # -UNDEBUG here so debug builds actually get working assertions.
+    cflags="-O1 -g -UNDEBUG"
     case "$OPT_SANITIZER" in
       asan)
         cflags+=" -fsanitize=address -fno-omit-frame-pointer"
