@@ -235,6 +235,46 @@ day-to-day incremental builds:
 
 State is tracked in `.build-state` (gitignored) at the workspace root.
 
+### Removing build artifacts — `clean`
+
+Counterpart to `build`. Cleans in **reverse** dependency order
+(`Cbc` → `Cgl` → `Clp` → `Osi` → `CoinUtils`), with three levels:
+
+```sh
+./clean                 # make clean — objects/libs/binaries; tree stays configured
+./clean Cbc Cgl         # ...only these projects
+./clean --distclean     # also configure output; you must re-run ./config afterwards
+./clean --deep          # git clean -xfd — everything untracked (asks first)
+./clean --deep --dry-run  # list exactly what --deep would delete, delete nothing
+./clean --prefix        # also rm -rf the install prefix (derived from the Makefile)
+./clean --state         # also remove .build-state, forcing a full rebuild
+./clean --all           # --deep + --prefix + --state
+```
+
+> ⚠️ **`make clean` is only as complete as each project's Makefile, and
+> `Clp`/`Cgl` do not gitignore their build output at all** (only `CoinUtils`,
+> `Osi` and `Cbc` do). So a "clean-looking" `git status` in `Clp`/`Cgl` means
+> nothing, and `--deep` is the only level guaranteed to leave a pristine tree.
+> Since it is also the only level that can delete something you wanted,
+> `--deep` prints a per-project count and prompts before deleting (`--yes`
+> to skip, `--dry-run` to preview the full list).
+
+**`--deep` never touches the 42 MB `Cbc/test/mip-sanity-data` submodule.** It
+passes a single `-f`, which makes `git clean` refuse to recurse into a nested
+git checkout (`Skipping repository test/mip-sanity-data`); the script never
+passes `-ff`. Tracked files are likewise safe, including the shipped
+`configure`/`Makefile.in` — so no level of `clean` can force an autotools
+regeneration, and you never need `./regen-autotools` just because you cleaned.
+
+**Reconfiguring after a dependency upgrades is the main reason to reach for
+`--distclean`/`--deep`.** `configure` bakes absolute library paths into each
+`Makefile`, so a Homebrew version bump (e.g. `suite-sparse` 7.12.2 → 7.12.3)
+leaves stale `-I`/`-L` paths behind and the next build fails with
+`amd.h: No such file or directory` or `cannot find -lamd`, even though nothing
+in the source changed. `./clean --distclean && ./config ...` fixes it;
+`make clean` alone will not, because it preserves the Makefile holding the
+dead path.
+
 ### Packaging relocatable distribution bundles — `package`
 
 After `./config --install`, `./package` turns an installed prefix into a

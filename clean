@@ -1,0 +1,262 @@
+#!/usr/bin/env bash
+# clean — remove build artifacts from the cbc-workspace multi-repo stack.
+#
+# Counterpart to ./build. Cleans, in reverse dependency order
+# (Cbc -> Cgl -> Clp -> Osi -> CoinUtils), so that a project is cleaned
+# before the projects it depends on.
+#
+# Three levels, in increasing severity:
+#
+#   (default)     make clean      — object files, libraries, binaries.
+#                                   The tree stays configured: ./build works
+#                                   immediately afterwards.
+#   --distclean   make distclean  — the above plus configure output (Makefile,
+#                                   config.status, config.log, libtool, *.pc,
+#                                   src/config*.h). The tree is NO LONGER
+#                                   configured: you must re-run ./config
+#                                   before ./build will work again.
+#   --deep        git clean -xfd  — everything not tracked by git, including
+#                                   whatever the Makefile forgot and files left
+#                                   behind by an interrupted or reconfigured
+#                                   build. Implies --distclean semantics.
+#
+# Because `make clean` is only as complete as each project's Makefile, and two
+# of the five projects (Clp, Cgl) do not even gitignore their build output,
+# --deep is the only level guaranteed to leave a pristine tree. It is also the
+# only level that can delete files you may care about, so it always lists what
+# it would remove and asks before doing it (override with --yes).
+#
+# Always preserved, at every level:
+#   - the 42 MB Cbc/test/mip-sanity-data submodule (single -f never recurses
+#     into a nested git checkout; this script also never passes -ff)
+#   - tracked files, including the shipped ./configure and Makefile.in — so no
+#     level of this script can force an autotools regeneration. (COIN-OR ships
+#     configure/Makefile.in tracked, with maintainer-mode rules commented out.)
+#   - the install prefix (~/prog/cbc*) — this script only touches source trees.
+#     Use --prefix to remove an installed prefix as well.
+#
+# Note that --deep does remove generated aclocal.m4 files should any exist
+# (./regen-autotools creates them); re-run ./regen-autotools if you need them.
+#
+# Usage:
+#   ./clean                      # make clean, all 5 projects
+#   ./clean Cbc Cgl              # ...only these projects
+#   ./clean --distclean          # also remove configure output (re-run ./config after)
+#   ./clean --deep               # git clean -xfd (asks first)
+#   ./clean --deep --yes         # ...without asking
+#   ./clean --deep --dry-run     # show what --deep would delete, delete nothing
+#   ./clean --prefix             # also rm -rf the install prefix
+#   ./clean --state              # also remove ./.build-state (forces full rebuild)
+set -euo pipefail
+
+WORKSPACE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STATE_FILE="$WORKSPACE_ROOT/.build-state"
+
+# Reverse of ./build's CoinUtils -> Osi -> Clp -> Cgl -> Cbc.
+REPOS=(Cbc Cgl Clp Osi CoinUtils)
+
+MODE="clean"          # clean | distclean | deep
+CLEANED=0             # projects actually cleaned (drives the closing hint)
+UNCONFIGURED=0        # projects skipped for lack of a Makefile
+DRY_RUN=0
+ASSUME_YES=0
+DO_PREFIX=0
+DO_STATE=0
+EXPLICIT_REPOS=()
+
+if [[ -t 1 ]]; then
+  BOLD=$'\033[1m'; DIM=$'\033[2m'; RED=$'\033[31m'
+  GREEN=$'\033[32m'; YELLOW=$'\033[33m'; CYAN=$'\033[36m'; RESET=$'\033[0m'
+else
+  BOLD=""; DIM=""; RED=""; GREEN=""; YELLOW=""; CYAN=""; RESET=""
+fi
+
+for arg in "$@"; do
+  case "$arg" in
+    --distclean)          MODE="distclean" ;;
+    --deep|--git-clean)   MODE="deep" ;;
+    --dry-run|-n)         DRY_RUN=1 ;;
+    --yes|-y)             ASSUME_YES=1 ;;
+    --prefix)             DO_PREFIX=1 ;;
+    --state)              DO_STATE=1 ;;
+    --all)                MODE="deep"; DO_PREFIX=1; DO_STATE=1 ;;
+    # Print the whole header comment block (everything above `set -euo pipefail`)
+    # so this stays correct if the header grows, rather than a hardcoded range.
+    -h|--help)            sed -n '2,/^set -euo pipefail/p' "$0" | sed '$d; s/^# \?//'; exit 0 ;;
+    CoinUtils|Osi|Clp|Cgl|Cbc) EXPLICIT_REPOS+=("$arg") ;;
+    *) echo "Unknown option/repo: $arg (try --help)" >&2; exit 1 ;;
+  esac
+done
+
+# Restrict to the requested projects, keeping reverse-dependency order. Unlike
+# ./build there is no dependents propagation: removing Cbc's objects cannot
+# invalidate CoinUtils, and cleaning an upstream project does not oblige us to
+# clean its dependents (the next ./build rebuilds them anyway).
+if [[ ${#EXPLICIT_REPOS[@]} -gt 0 ]]; then
+  filtered=()
+  for repo in "${REPOS[@]}"; do
+    for want in "${EXPLICIT_REPOS[@]}"; do
+      [[ "$repo" == "$want" ]] && filtered+=("$repo") && break
+    done
+  done
+  REPOS=("${filtered[@]}")
+fi
+
+echo "${BOLD}=== clean (mode=$MODE$( ((DRY_RUN)) && echo ', dry-run' )) ===${RESET}"
+echo "${DIM}Projects, in reverse dependency order: ${REPOS[*]}${RESET}"
+echo
+
+# ---- helper: is this project configured? -----------------------------------
+# `make clean`/`distclean` need a Makefile, which only exists post-configure.
+# A never-configured (or already distcleaned) tree is not an error here.
+is_configured() { [[ -f "$1/Makefile" ]]; }
+
+# ---- --deep: preview, then confirm -----------------------------------------
+# `git clean -xfd` is irreversible, so always show the damage first. -x also
+# clears ignored files (that is the point: .o/.lo/.libs live there), which is
+# why the preview matters even on a "clean-looking" tree.
+if [[ "$MODE" == "deep" ]]; then
+  total=0
+  declare -A COUNTS=()
+  for repo in "${REPOS[@]}"; do
+    dir="$WORKSPACE_ROOT/$repo"
+    [[ -e "$dir/.git" ]] || continue
+    n="$(git -C "$dir" clean -xfdn 2>/dev/null | wc -l | tr -d ' ')"
+    COUNTS[$repo]="$n"
+    total=$((total + n))
+    printf "  %-12s %s%s entr%s%s\n" "$repo" "$DIM" "$n" \
+      "$( [[ "$n" == "1" ]] && echo y || echo ies )" "$RESET"
+  done
+  echo
+
+  if [[ "$total" -eq 0 ]]; then
+    echo "${GREEN}Nothing to remove — every tree is already pristine.${RESET}"
+  elif (( DRY_RUN )); then
+    echo "${CYAN}Would remove ${total} path(s). Full listing:${RESET}"
+    for repo in "${REPOS[@]}"; do
+      dir="$WORKSPACE_ROOT/$repo"
+      [[ -e "$dir/.git" ]] || continue
+      [[ "${COUNTS[$repo]:-0}" == "0" ]] && continue
+      git -C "$dir" clean -xfdn 2>/dev/null | sed "s|^Would remove |  $repo/|"
+    done
+    echo
+    echo "${DIM}(dry run — nothing was deleted)${RESET}"
+    exit 0
+  elif (( ! ASSUME_YES )); then
+    echo "${YELLOW}About to ${BOLD}permanently delete ${total} path(s)${RESET}${YELLOW} across ${#REPOS[@]} project(s).${RESET}"
+    echo "${DIM}Tracked files, and the Cbc/test/mip-sanity-data submodule, are preserved.${RESET}"
+    echo "${DIM}Run with --dry-run to see the full list first.${RESET}"
+    printf "Proceed? [y/N] "
+    read -r reply
+    [[ "$reply" == [Yy]* ]] || { echo "Aborted."; exit 1; }
+    echo
+  fi
+fi
+
+# ---- clean each project -----------------------------------------------------
+for repo in "${REPOS[@]}"; do
+  dir="$WORKSPACE_ROOT/$repo"
+  if [[ ! -d "$dir" ]]; then
+    echo "${DIM}[$repo] no such directory — skipping${RESET}"
+    continue
+  fi
+
+  case "$MODE" in
+    clean|distclean)
+      target="$MODE"
+      if ! is_configured "$dir"; then
+        echo "${DIM}[$repo] not configured (no Makefile) — nothing to $target${RESET}"
+        UNCONFIGURED=$((UNCONFIGURED + 1))
+        continue
+      fi
+      CLEANED=$((CLEANED + 1))
+      if (( DRY_RUN )); then
+        echo "${CYAN}[$repo]${RESET} would run: make -C $repo $target"
+        continue
+      fi
+      echo "${CYAN}[$repo]${RESET} make $target"
+      # distclean removes the very Makefile it is driven from; that is expected
+      # and not a failure. Errors are tolerated for the same reason ./build
+      # tolerates them on its pre-build clean: a partially-configured tree
+      # should still get as clean as it can.
+      make -C "$dir" "$target" >/dev/null 2>&1 || \
+        echo "  ${DIM}(make $target reported errors — continuing)${RESET}"
+      ;;
+    deep)
+      [[ -e "$dir/.git" ]] || { echo "${DIM}[$repo] not a git checkout — skipping${RESET}"; continue; }
+      [[ "${COUNTS[$repo]:-0}" == "0" ]] && { echo "${DIM}[$repo] already pristine${RESET}"; continue; }
+      echo "${CYAN}[$repo]${RESET} git clean -xfd  ${DIM}(${COUNTS[$repo]} entries)${RESET}"
+      # Deliberately a single -f: it makes git refuse to recurse into nested
+      # git checkouts, which is what protects Cbc/test/mip-sanity-data.
+      git -C "$dir" clean -xfd >/dev/null
+      ;;
+  esac
+done
+
+# ---- optional extras --------------------------------------------------------
+if (( DO_STATE )); then
+  if [[ -f "$STATE_FILE" ]]; then
+    if (( DRY_RUN )); then
+      echo "${CYAN}[state]${RESET} would remove .build-state"
+    else
+      rm -f "$STATE_FILE"
+      echo "${CYAN}[state]${RESET} removed .build-state ${DIM}(next ./build rebuilds everything)${RESET}"
+    fi
+  else
+    echo "${DIM}[state] .build-state absent — nothing to remove${RESET}"
+  fi
+fi
+
+if (( DO_PREFIX )); then
+  # Derive the prefix from a configured tree rather than assuming ~/prog/cbc,
+  # so that --debug/--sanitizer builds (cbc-dbg, cbc-asan, cbc-tsan, cbc-vg)
+  # are honoured. Falls back to the ./config default.
+  prefix=""
+  for repo in "${REPOS[@]}" Cbc CoinUtils; do
+    mk="$WORKSPACE_ROOT/$repo/Makefile"
+    [[ -f "$mk" ]] || continue
+    prefix="$(awk -F' = ' '/^prefix = /{print $2; exit}' "$mk")"
+    [[ -n "$prefix" ]] && break
+  done
+  if [[ -z "$prefix" ]]; then
+    echo "${YELLOW}[prefix] cannot determine the install prefix (no configured tree left).${RESET}"
+    echo "${DIM}          Clean the prefix before --distclean/--deep, or remove it by hand.${RESET}"
+  elif [[ ! -d "$prefix" ]]; then
+    echo "${DIM}[prefix] $prefix does not exist — nothing to remove${RESET}"
+  elif (( DRY_RUN )); then
+    echo "${CYAN}[prefix]${RESET} would remove $prefix"
+  else
+    # Guard against a catastrophic rm -rf from a malformed/empty prefix.
+    case "$prefix" in
+      /|/usr|/usr/local|"$HOME"|"")
+        echo "${RED}[prefix] refusing to remove suspicious prefix: '$prefix'${RESET}" >&2
+        exit 1 ;;
+    esac
+    if (( ! ASSUME_YES )); then
+      printf "${YELLOW}Remove install prefix %s? [y/N] ${RESET}" "$prefix"
+      read -r reply
+      [[ "$reply" == [Yy]* ]] || { echo "Skipped prefix."; prefix=""; }
+    fi
+    if [[ -n "$prefix" ]]; then
+      rm -rf "$prefix"
+      echo "${CYAN}[prefix]${RESET} removed $prefix"
+    fi
+  fi
+fi
+
+echo
+if (( DRY_RUN )); then
+  echo "${BOLD}dry run complete — nothing was deleted.${RESET}"
+else
+  echo "${BOLD}${GREEN}clean done.${RESET}"
+  case "$MODE" in
+    clean)
+      if (( CLEANED )); then
+        echo "${DIM}Trees are still configured — run ./build to rebuild.${RESET}"
+      else
+        echo "${DIM}Nothing was configured, so nothing was cleaned — run ./config first.${RESET}"
+      fi ;;
+    distclean|deep)
+      echo "${DIM}Trees are no longer configured — run ./config before ./build.${RESET}" ;;
+  esac
+fi
