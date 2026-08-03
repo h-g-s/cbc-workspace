@@ -278,11 +278,22 @@ _pkgcfg() {
     pkg-config "$flag" "$pkg" 2>/dev/null
 }
 
+# Compiler used for header/detection probing below: honour $CC if the caller
+# set it, otherwise fall back through `cc` then `gcc` — plain `cc` doesn't
+# exist on a fresh MinGW/MSYS2 toolchain (mingw-w64-x86_64-gcc only installs
+# `gcc`), so relying on `${CC:-cc}` alone silently made every _check_header
+# probe fail there (compiler "not found"), misdetecting zlib/other optional
+# deps as absent even when installed and explicitly requested via --zlib.
+DETECT_CC="${CC:-}"
+if [[ -z "$DETECT_CC" ]]; then
+  DETECT_CC="$(command -v cc 2>/dev/null || command -v gcc 2>/dev/null || echo cc)"
+fi
+
 # Try to compile a 1-line program including $1, with extra flags $2.. .
 _check_header() {
   local header="$1"; shift
   echo "#include <${header}>
-int main(void){return 0;}" | "${CC:-cc}" "$@" -x c - -o /dev/null 2>/dev/null
+int main(void){return 0;}" | "$DETECT_CC" "$@" -x c - -o /dev/null 2>/dev/null
   local rc=$?
   rm -f a.out 2>/dev/null
   return $rc
@@ -302,7 +313,7 @@ detect_optional_deps() {
   # ── Is the compiler we will actually use a Homebrew compiler? ─────────────
   if [[ -n "$BREW_PREFIX" ]]; then
     local _cc_path
-    _cc_path="$(command -v "${CC:-cc}" 2>/dev/null || true)"
+    _cc_path="$(command -v "$DETECT_CC" 2>/dev/null || true)"
     [[ "$_cc_path" == "${BREW_PREFIX}"/* ]] && USE_BREW_LIBS=1
   fi
 
