@@ -399,6 +399,14 @@ detect_optional_deps() {
     ZLIB_AVAIL=1
     ZLIB_CFLAGS="-I${BREW_PREFIX}/opt/zlib/include"
     ZLIB_LFLAGS="-L${BREW_PREFIX}/opt/zlib/lib"
+  elif _pkgcfg "" --exists zlib 2>/dev/null; then
+    # Prefer pkg-config over the _check_header compile probe below: MSYS2's
+    # mingw-w64-x86_64-zlib ships a zlib.pc but piping a test program to a
+    # native (non-MSYS) mingw-w64 gcc across stdin proved unreliable in CI,
+    # silently misdetecting zlib as absent even when installed.
+    ZLIB_AVAIL=1
+    ZLIB_CFLAGS="$(_pkgcfg "" --cflags zlib)"
+    ZLIB_LFLAGS="$(_pkgcfg "" --libs zlib)"
   elif _check_header zlib.h; then
     ZLIB_AVAIL=1
   elif [[ -n "$BREW_PREFIX" && -d "${BREW_PREFIX}/opt/zlib" ]]; then
@@ -412,6 +420,10 @@ detect_optional_deps() {
     BZ2_AVAIL=1
     BZ2_CFLAGS="-I${BREW_PREFIX}/opt/bzip2/include"
     BZ2_LFLAGS="-L${BREW_PREFIX}/opt/bzip2/lib"
+  elif _pkgcfg "" --exists bzip2 2>/dev/null; then
+    BZ2_AVAIL=1
+    BZ2_CFLAGS="$(_pkgcfg "" --cflags bzip2)"
+    BZ2_LFLAGS="$(_pkgcfg "" --libs bzip2)"
   elif _check_header bzlib.h; then
     BZ2_AVAIL=1
   elif [[ -n "$BREW_PREFIX" && -d "${BREW_PREFIX}/opt/bzip2" ]]; then
