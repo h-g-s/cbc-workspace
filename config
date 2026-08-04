@@ -318,11 +318,25 @@ detect_optional_deps() {
   fi
 
   # ── LAPACK / OpenBLAS ──────────────────────────────────────────────────────
+  # On macOS, always prefer Apple's built-in Accelerate framework (vecLib)
+  # over Homebrew's OpenBLAS: it needs no extra install, is universal across
+  # arm64/x86_64, and — crucially — avoids a real crash. Homebrew's OpenBLAS
+  # is built with OpenMP support against LLVM's libomp.dylib; when linked
+  # into a GCC-built `cbc` (which uses its own -fopenmp/libgomp for
+  # CbcModel's own threading), the dynamic linker can end up resolving
+  # `omp_set_num_threads` into the wrong runtime, and having two OpenMP
+  # runtimes loaded in one process aborts at startup ("OMP: Error #15:
+  # Initializing libomp.dylib, but found libomp.dylib already initialized").
+  # Accelerate has no OpenMP dependency at all, sidestepping the clash.
+  if [[ "$(uname -s)" == "Darwin" ]] && [[ -d /System/Library/Frameworks/Accelerate.framework ]]; then
+    LAPACK_AVAIL=1
+    LAPACK_LFLAGS="-framework Accelerate"
+    LAPACK_WHAT="macOS Accelerate framework"
   # OpenBLAS is a faster drop-in that also provides LAPACK; prefer it over a
   # bare reference LAPACK/BLAS when found. Homebrew ships it as "openblas"
   # (not under the generic lapack.pc/blas.pc names autoconf looks for), so we
   # always pass explicit --with-lapack-lflags when using it.
-  if (( USE_BREW_LIBS )) && [[ -d "${BREW_PREFIX}/opt/openblas" ]]; then
+  elif (( USE_BREW_LIBS )) && [[ -d "${BREW_PREFIX}/opt/openblas" ]]; then
     LAPACK_AVAIL=1
     LAPACK_LFLAGS="$(_pkgcfg "${BREW_PREFIX}/opt/openblas/lib/pkgconfig" --libs openblas)"
     LAPACK_WHAT="Homebrew OpenBLAS"
