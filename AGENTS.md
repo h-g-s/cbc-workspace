@@ -483,6 +483,25 @@ repository").
 > changes, and validated with a rebuild + a quick `./test` subset (e.g.
 > `./test 'bpc_*' 'kna*'`) to confirm the reformat didn't alter behavior.
 
+## Benchmarking and improving cut generators
+
+`BENCHMARKING-CUT-GENERATORS.md` documents the process for measuring and
+improving a cut generator: dumping fixtures at the call site (preprocessed
+matrix + optimal basis + the generator's auxiliary structures), replaying them
+offline in a standalone benchmark instead of paying for a full CBC run per
+experiment, and the metric hierarchy that decides whether a change helped —
+**bound improvement on reoptimizing, never cut count**.
+
+It is worth reading before optimizing any generator, because most of it is a
+list of measurement traps that each produced a false result once: timing under
+a parallel harness, probing a different structure than the real call site,
+isolating a cost by changing a strategy, and comparing binaries that never
+linked the change. Written from the `CglBKClique` work (2.99x on the slowest
+fixture, byte-identical cuts) and generalised — the fixture format is
+generator-agnostic apart from its payload, and the existing 357 preprocessed
+instances plus 237 clique fixtures under `~/instances/miplib/2017+spp/` are
+reusable as-is.
+
 ## Related Work
 
 This workspace complements — but is independent from — `h-g-s/mipster`, a separate
