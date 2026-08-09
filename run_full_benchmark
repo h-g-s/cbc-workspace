@@ -28,25 +28,48 @@
 #   memory_usage.tsv             — memory utilisation sampled every 5 min during the run
 #   experiment_setup.md          — build environment + hardware, for reproducibility
 #
-# Status values in summary.tsv:
-#   SOLVED            solved; objective matches the mip-sanity-data reference
-#   SOLVED(no_ref)    solved; no reference objective available
-#   SOLVED(inf)       CBC proved infeasible; bks.tsv agrees (or no reference)
-#   INVALID_SOL       CBC found a solution but cbc_validate_sol rejected it
-#   WRONG_OBJ         solved but objective is worse than the reference
-#   INFEASIBLE_WRONG  CBC proved infeasible but a numeric objective was expected
-#   NO_SOLUTION       CBC exited normally but found no integer feasible solution
-#   TIMEOUT           reached the time limit; CBC exited on its own
-#   TIMEOUT(no_sol)   timed out without finding any feasible solution
-#   TIMEOUT(gap=X%)   timed out with a feasible solution, gap X%
-#   MEMLIMIT          reached the -maxMem memory limit; CBC exited on its own
-#   MEMLIMIT(no_sol)  hit the memory limit without finding any feasible solution
-#   MEMLIMIT(gap=X%)  hit the memory limit with a feasible solution, gap X%
-#   OVERTIME          CBC ignored its own time limit and was killed after the overtime grace
-#   CRASH(exit=N)     non-zero exit, no sanitizer markers detected
-#   ASAN_ERROR        AddressSanitizer error found in log
-#   TSAN_RACE         ThreadSanitizer race found in log
-#   VG_ERROR          valgrind reported errors (--error-exitcode=42 triggered)
+# Status values in summary.tsv, grouped by what they mean for the *search*
+# (not just for the icon shown while running):
+#
+#   "Solved" — the search completed: optimality (or infeasibility) was
+#   PROVEN. This is the only outcome that certifies the reported objective.
+#     SOLVED            proven optimal; objective matches the mip-sanity-data reference
+#     SOLVED(no_ref)    proven optimal; no reference objective available
+#     SOLVED(inf)       proven infeasible; bks.tsv agrees (or no reference)
+#
+#   "Timeout" — a completely NORMAL, expected outcome for hard instances: the
+#   search was interrupted by one of its own limits (time/nodes/memory) and
+#   exited cleanly on its own. Not proven optimal, but not a bug either — this
+#   is *not* rendered with a warning icon in the live progress output.
+#     TIMEOUT           reached the time/node limit; CBC exited on its own
+#     TIMEOUT(no_sol)   timed out without finding any feasible (incumbent) solution
+#     TIMEOUT(gap=X%)   timed out with a feasible solution, remaining gap X%
+#     MEMLIMIT          reached the -maxMem memory limit; CBC exited on its own
+#     MEMLIMIT(no_sol)  hit the memory limit without finding any feasible solution
+#     MEMLIMIT(gap=X%)  hit the memory limit with a feasible solution, remaining gap X%
+#
+#   "Overtime"/failures — genuinely abnormal outcomes that deserve attention:
+#     OVERTIME          CBC ignored its own time/node/memory limit by more than
+#                       the overtime grace period and had to be killed by
+#                       `timeout --kill-after`; always counted as a failure.
+#     NO_SOLUTION       CBC exited normally (exit 0, no limit detected as hit)
+#                       yet reported neither a solution nor a proof — this
+#                       should be rare; treat it as a parsing/classification
+#                       bug to investigate, not a normal search outcome.
+#     INVALID_SOL       CBC found a solution but cbc_validate_sol rejected it
+#     WRONG_OBJ         solved but objective is worse than the reference
+#     INFEASIBLE_WRONG  CBC proved infeasible but a numeric objective was expected
+#     CRASH(exit=N)     non-zero exit, no sanitizer markers detected
+#     ASAN_ERROR        AddressSanitizer error found in log
+#     TSAN_RACE         ThreadSanitizer race found in log
+#     VG_ERROR          valgrind reported errors (--error-exitcode=42 triggered)
+#
+# Note the "(no_sol)" suffix can appear on TIMEOUT/MEMLIMIT: those instances
+# DID hit a normal limit (so they count as TIMEOUT/MEMLIMIT, not a failure),
+# but no integer-feasible solution was found before the limit was reached.
+# The end-of-run summary line reports a dedicated "without a feasible
+# solution" count (independent of the timeout/memlimit/failure split above)
+# so this doesn't get silently absorbed into either bucket.
 #
 # Usage:
 #   ./run_full_benchmark [OPTIONS] [instance-glob ...]
@@ -607,15 +630,23 @@ run_instance() {
     "$status" "${obj:--}" "${dual:--}" "${exp:--}" "$elapsed" "$THREADS" "$cbc_gap" \
     "$solution_found" "$proven_infeasible" "$timed_out" > "$resultfile"
 
-  local C_RESET='' C_BGREEN='' C_YELLOW='' C_BYELLOW='' C_BRED=''
+  local C_RESET='' C_BGREEN='' C_CYAN='' C_BYELLOW='' C_BRED=''
   if [[ "${USE_COLOR:-0}" -eq 1 ]]; then
-    C_RESET='\033[0m'; C_BGREEN='\033[1;32m'; C_YELLOW='\033[0;33m'; C_BYELLOW='\033[1;33m'; C_BRED='\033[1;31m'
+    C_RESET='\033[0m'; C_BGREEN='\033[1;32m'; C_CYAN='\033[0;36m'; C_BYELLOW='\033[1;33m'; C_BRED='\033[1;31m'
   fi
   local icon sc
   case "$status" in
+    # SOLVED*: optimality/infeasibility proven.
     SOLVED|SOLVED\(*)      icon="✓"; sc="$C_BGREEN"  ;;
-    TIMEOUT*|MEMLIMIT*)    icon="⚠"; sc="$C_YELLOW"  ;;
-    NO_SOLUTION|OVERTIME)  icon="⚠"; sc="$C_BYELLOW" ;;
+    # TIMEOUT*/MEMLIMIT* (incl. the "(no_sol)" variants): the search hit one
+    # of its own limits and stopped cleanly — a normal, expected result for
+    # hard instances, not a warning.
+    TIMEOUT*|MEMLIMIT*)    icon="⏱"; sc="$C_CYAN"    ;;
+    # NO_SOLUTION: exited cleanly without hitting any known limit and without
+    # a proof or solution — unexpected, worth a warning/investigation.
+    NO_SOLUTION)           icon="⚠"; sc="$C_BYELLOW" ;;
+    # Everything else (OVERTIME, CRASH, ASAN/TSAN/VG errors, INVALID_SOL,
+    # WRONG_OBJ, INFEASIBLE_WRONG) is a genuine failure.
     *)                     icon="✗"; sc="$C_BRED"    ;;
   esac
   local display_name="$name"
@@ -729,7 +760,19 @@ printf "%-42s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
   "instance" "status" "objective" "dual_bound" "expected" "elapsed_s" "threads" "gap_field" \
   "solution_found" "proven_infeasible" "timed_out" > "$SUMMARY"
 
-SOLVED_COUNT=0; TIMEOUT_COUNT=0; MEMLIMIT_COUNT=0; NO_SOLUTION_COUNT=0; FAIL=0; OVERTIME_COUNT=0
+# NOTE on counting: SOLVED_COUNT/TIMEOUT_COUNT/MEMLIMIT_COUNT/FAIL are a
+# strict partition of all instances by *how the run ended* (proof, normal
+# limit, or failure). NO_FEASIBLE_COUNT is a DIFFERENT, cross-cutting tally:
+# it counts instances that never produced an integer-feasible incumbent
+# (solution_found=0, and not a proven-infeasible instance), regardless of
+# which of the buckets above they landed in — this is what actually answers
+# "did the search ever find a feasible solution?" and previously wasn't
+# surfaced anywhere in the summary line (TIMEOUT(no_sol)/MEMLIMIT(no_sol)
+# instances were silently absorbed into TIMEOUT_COUNT/MEMLIMIT_COUNT, while
+# the old "no-solution" summary count only ever reflected the rare
+# clean-exit CLEAN_NO_SOLUTION_COUNT case below, not these).
+SOLVED_COUNT=0; TIMEOUT_COUNT=0; MEMLIMIT_COUNT=0; CLEAN_NO_SOLUTION_COUNT=0; FAIL=0; OVERTIME_COUNT=0
+NO_FEASIBLE_COUNT=0
 FAILED_NAMES=()
 
 for name in "${INSTANCES[@]}"; do
@@ -743,6 +786,9 @@ for name in "${INSTANCES[@]}"; do
   printf "%-42s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
     "$name" "$status" "$obj" "${dual:--}" "$exp" "$elapsed" "$thr" "${gap:--}" \
     "$solution_found" "$proven_infeasible" "$timed_out" >> "$SUMMARY"
+  if [[ "${solution_found:-0}" -eq 0 && "${proven_infeasible:-0}" -eq 0 ]]; then
+    NO_FEASIBLE_COUNT=$((NO_FEASIBLE_COUNT+1))
+  fi
   if [[ "$status" == SOLVED || "$status" == SOLVED\(* ]]; then
     SOLVED_COUNT=$((SOLVED_COUNT+1))
   elif [[ "$status" == TIMEOUT* ]]; then
@@ -750,7 +796,7 @@ for name in "${INSTANCES[@]}"; do
   elif [[ "$status" == MEMLIMIT* ]]; then
     MEMLIMIT_COUNT=$((MEMLIMIT_COUNT+1))
   elif [[ "$status" == "NO_SOLUTION" ]]; then
-    NO_SOLUTION_COUNT=$((NO_SOLUTION_COUNT+1))
+    CLEAN_NO_SOLUTION_COUNT=$((CLEAN_NO_SOLUTION_COUNT+1))
   else
     FAIL=$((FAIL+1)); FAILED_NAMES+=("$name")
     [[ "$status" == "OVERTIME" ]] && OVERTIME_COUNT=$((OVERTIME_COUNT+1))
@@ -767,10 +813,27 @@ fi
 {
   echo ""
   echo "═══════════════════════════════════════════════════"
-  printf "  Results: %d/%d solved/proved, %d timed out, %d mem-limited, %d no-solution, %d failed" \
-    "$SOLVED_COUNT" "$TOTAL" "$TIMEOUT_COUNT" "$MEMLIMIT_COUNT" "$NO_SOLUTION_COUNT" "$FAIL"
-  [[ $OVERTIME_COUNT -gt 0 ]] && printf "  (%d OVERTIME — ignored time limit)" "$OVERTIME_COUNT"
-  echo ""
+  # "solved/proved" = optimality or infeasibility PROVEN.
+  # "timed out"/"mem-limited" = search hit its own limit and stopped cleanly
+  #   — a normal, expected outcome for hard instances, not a failure.
+  # "failed" = a genuine problem (OVERTIME killed after ignoring its own
+  #   limit, crash, sanitizer error, invalid/wrong solution, ...).
+  printf "  Results: %d/%d solved/proved, %d timed out, %d mem-limited, %d failed\n" \
+    "$SOLVED_COUNT" "$TOTAL" "$TIMEOUT_COUNT" "$MEMLIMIT_COUNT" "$FAIL"
+  # Cross-cutting: how many of the above never found ANY feasible solution
+  # (regardless of whether they timed out, hit the memory limit, or failed).
+  if [[ $NO_FEASIBLE_COUNT -gt 0 ]]; then
+    printf "  %d instance(s) finished without ever finding a feasible solution (TIMEOUT/MEMLIMIT(no_sol) + failures)\n" \
+      "$NO_FEASIBLE_COUNT"
+  fi
+  if [[ $OVERTIME_COUNT -gt 0 ]]; then
+    printf "  %d instance(s) OVERTIME — ignored their own time/node/memory limit and had to be killed\n" \
+      "$OVERTIME_COUNT"
+  fi
+  if [[ $CLEAN_NO_SOLUTION_COUNT -gt 0 ]]; then
+    printf "  %d instance(s) NO_SOLUTION — exited cleanly with no limit hit and no solution/proof (unexpected — investigate)\n" \
+      "$CLEAN_NO_SOLUTION_COUNT"
+  fi
   echo "  Finished: $(date)"
   if [[ -n "$MEM_PEAK_USED" ]]; then
     echo "  Peak memory used:  ${MEM_PEAK_USED} MB / ${MEM_PEAK_TOTAL} MB (${MEM_PEAK_PCT}%)"
