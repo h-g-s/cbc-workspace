@@ -23,6 +23,7 @@
 #     --sanitizer=none         No sanitiser                   [default]
 #     --sanitizer=asan         AddressSanitizer
 #     --sanitizer=tsan         ThreadSanitizer
+#     --sanitizer=ubsan        UndefinedBehaviorSanitizer
 #     --sanitizer=valgrind     Valgrind-friendly (no ASan/TSan, keeps frame ptrs)
 #
 #   Compiler optimisations:
@@ -117,7 +118,7 @@ fi
 
 # ── Defaults ─────────────────────────────────────────────────────────────────
 OPT_BUILD_MODE="opt"       # opt | debug
-OPT_SANITIZER="none"       # none | asan | tsan | valgrind
+OPT_SANITIZER="none"       # none | asan | tsan | ubsan | valgrind
 OPT_ARCH="native"          # generic | native | <named preset, see _arch_choices>
 OPT_AVX2=0                 # 1=on 0=off  (only applies on x86_64; adds -DCOIN_AVX2=4)
 
@@ -190,8 +191,8 @@ parse_args() {
 # ── Validation ────────────────────────────────────────────────────────────────
 validate_opts() {
   case "$OPT_SANITIZER" in
-    none|asan|tsan|valgrind) ;;
-    *) echo "${RED}Invalid sanitizer '${OPT_SANITIZER}'. Use: none asan tsan valgrind${RESET}" >&2; exit 1 ;;
+    none|asan|tsan|ubsan|valgrind) ;;
+    *) echo "${RED}Invalid sanitizer '${OPT_SANITIZER}'. Use: none asan tsan ubsan valgrind${RESET}" >&2; exit 1 ;;
   esac
   case "$OPT_LIB_TYPE" in
     static|shared|both) ;;
@@ -238,6 +239,7 @@ derive_prefix() {
   case "$OPT_SANITIZER" in
     asan)     OPT_PREFIX="${base}-asan"  ;;
     tsan)     OPT_PREFIX="${base}-tsan" ;;
+    ubsan)    OPT_PREFIX="${base}-ubsan" ;;
     valgrind) OPT_PREFIX="${base}-vg"   ;;
     *)
       if [[ "$OPT_BUILD_MODE" == "opt" ]]; then
@@ -580,6 +582,14 @@ build_flags() {
         cflags+=" -fsanitize=thread -fno-omit-frame-pointer"
         ldflags+=" -fsanitize=thread"
         ;;
+      ubsan)
+        # -fno-sanitize-recover=undefined makes UBSan abort (rather than just
+        # print-and-continue) on the first violation, so a crash/hang always
+        # points at the exact offending statement instead of silently running
+        # past corrupted state.
+        cflags+=" -fsanitize=undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
+        ldflags+=" -fsanitize=undefined"
+        ;;
       valgrind)
         cflags+=" -fno-omit-frame-pointer"
         ;;
@@ -686,10 +696,11 @@ run_tui() {
   if [[ "$OPT_BUILD_MODE" == "debug" ]]; then
     _dlg --backtitle "$BT" \
          --title "  Runtime Sanitiser  " \
-         --radiolist $'\nSelect runtime instrumentation:\n' 12 62 3 \
+         --radiolist $'\nSelect runtime instrumentation:\n' 13 62 4 \
          "none"     "None  (plain debug build)"               ON  \
          "asan"     "AddressSanitizer  (memory errors)"       OFF \
          "tsan"     "ThreadSanitizer  (data races)"           OFF \
+         "ubsan"    "UndefinedBehaviorSanitizer  (UB errors)" OFF \
          "valgrind" "Valgrind-friendly  (no sanitiser, full frames)" OFF \
       || { echo "${YELLOW}Cancelled.${RESET}"; exit 0; }
     OPT_SANITIZER="$(_strip_quotes "$REPLY")"
@@ -842,7 +853,7 @@ run_tui_plain() {
   [[ -n "$yn" ]] && OPT_BUILD_MODE="$yn"
 
   if [[ "$OPT_BUILD_MODE" == "debug" ]]; then
-    read -rp "  Sanitiser [none/asan/tsan/valgrind] (default: none): " yn
+    read -rp "  Sanitiser [none/asan/tsan/ubsan/valgrind] (default: none): " yn
     [[ -n "$yn" ]] && OPT_SANITIZER="$yn"
   fi
 
