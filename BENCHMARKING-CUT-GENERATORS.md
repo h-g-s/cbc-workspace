@@ -127,6 +127,31 @@ conflicts, in the clique case). Log one line per fixture with sizes, distinguish
 from "the dump failed". Also skip anything not replayable — e.g. graph node count
 ≠ 2 × columns.
 
+**Gate the skip on the generator's own precondition, not on a previous
+generator's.** It is tempting to reuse an existing fixture set, and for the first
+five files that is right. But the *population* it selected is not: `clqsepFixtures`
+exists only where a conflict graph does, whereas `CglZeroHalf` keys off integer
+coefficients and cares nothing about binary conflicts. An instance of pure general
+integers with no conflict graph at all is a perfectly good — possibly hard —
+ZeroHalf case, and reusing the clique population would have silently excluded 121
+of 358 instances and biased every measurement that followed.
+`CbcZeroHalfFixtureDump.hpp` gates on whether `refreshSolver()` would find any
+usable row instead, and records that count in the `.meta` so a driver can tell
+"nothing to do here" from "the capture failed" without loading the model.
+
+**A dump budget is not a solve budget.** The dump point is inside the cut loop, so
+an instance whose *root LP alone* exceeds the time limit never reaches it and
+writes nothing at all — which looks like a dump failure and is not. At 300 s per
+instance, 87 of 358 came out that way, and they are exactly the large hard models
+worth having. So order the driver largest-first, make it resumable on the presence
+of the `.meta`, and plan a second pass at a much larger budget for the remainder;
+`.claude/local/cutgen-harness/gen-zh-fixtures.py` does all three. Note also that
+the dump is compile-gated while `CPPFLAGS` is empty in `Cbc/src/Makefile`, so
+`make CPPFLAGS=-DCBC_DUMP_..._FIXTURE` adds the define without replacing
+`CXXFLAGS` (which carries `-O3 -march=haswell` and would otherwise vanish). Build
+it to a separate binary and restore the normal one afterwards — a dump-enabled
+`cbc` writes fixtures on every solve.
+
 ### Basis gotchas worth pre-empting
 
 - **A name mismatch makes a basis silently inert.** If the MPS was written with
@@ -257,6 +282,25 @@ per-fixture table sorted by absolute time is the only view that matters, and a
   downstream extension cost (>99% of time) swings and swamps the signal. Only an
   A/B at *fixed* settings, where every other output is byte-identical, isolates a
   cost.
+- **The first read of a large fixture is page-cache cost, not separation cost.**
+  A 57 MB ZeroHalf fixture reported `sepTime 9.757` on its first replay and
+  **0.048** on every run after, on the same binary. Read cold that looks like a
+  200x discrepancy against the serial harness and invites a hunt for a linking
+  problem that is not there. A min-of-N harness discards it for free; a
+  hand-run one-off does not, so run any spot check twice and use the second.
+
+**Past ~20 s, more repetitions buy nothing.** Repetition exists to reject
+scheduler noise, which is tens of milliseconds — below the reporting precision of
+a fixture that takes minutes. `--reps=5` on a 30-minute baseline fixture spends
+two and a half hours refining a digit that will not move. `zh-serial.py` stops
+after one rep once a fixture exceeds 20 s, and five where it matters.
+
+**Report the slow tail as its own row.** An aggregate TOTAL is dominated by
+whichever single fixture is worst, so it flatters a change that fixes exactly one
+instance. A separate "fixtures over 1s" subtotal is what answers "did the slow
+cases get faster", which is usually the actual question: for the ZeroHalf
+group-by, TOTAL read 12.76x while the ten slow fixtures read 20.10x and the worst
+single fixture read 0.99x — on 6.8 ms, i.e. noise.
 
 ---
 
@@ -334,15 +378,46 @@ Ruled out and recorded: 64-bit BK bitsets (identical output, no gain);
 extension (it earns the bound: `objImprove` 6.598 at method 4 vs 0.627 at
 method 0).
 
+### And for `CglZeroHalf`, following the same recipe
+
+| step | finding |
+|---|---|
+| Stage profiling | the `REDUCTION` duplicate-row scan is **63%** of separation time overall, 83–98% on the slow tail — 14.0 billion inner iterations on `neos-4532248-waihi` |
+| Fix | its own comment called it a "very trivial implementation": an O(mr²) ordered-pair scan for a group-by. Bucket by a hash of the equality fields, compare only within a bucket |
+| Exactness | all 22 non-timing fields byte-identical over **885 of 896** fixtures (330 producing cuts) |
+| Speedup (serial, min-of-5) | slow tail **20.10x** (212.77s → 10.59s), best single fixture **370.8x**, worst 0.99x on 6.8 ms |
+| Whole solve | `neos-3402294-bobin` ZeroHalf 16.7s → **0.176s**, same 337 cuts at the same density |
+| Validity | Osi row-cut debugger against proven optima on the 19 instances where ZeroHalf actually cuts: **0 violations** |
+| Suite | 471/471 PASS, 324 confirmed optima, unchanged |
+| Negative result | the O(cnt³) pair-weakening stage — the *original* hypothesis — is only 6.1% aggregate and ≤0.8% on any slow fixture. Dead |
+
+The transferable lesson is the order of operations: the pair-weakening stage was
+the obvious suspect from reading the code, and pricing it with a control flag
+(`--max-pairs=0`) before optimizing anything is what stopped a week of work on a
+0.8% stage. §7 exists for this reason.
+
+Also worth carrying forward: reproducing a loop that **mutates its own guard
+while iterating** needs the semantics derived explicitly, not eyeballed. Here that
+meant three separate facts — only rows active on entry participate, the survivor
+of a class is the *last* row attaining the minimum slack, and classes are
+independent — each of which changes the output if got wrong. They were checked
+against a literal transcription of the old loop on 40,000 randomized instances
+with heavy slack ties and pre-deleted rows *before* the C++ was written, which is
+far cheaper than discovering it from a fixture diff.
+
 ---
 
 ## 9. Checklist for the next generator
 
 1. Pick the call site where matrix + LP + auxiliary structure are consistent.
    Dump behind an `#ifdef`; reuse `.mps.gz`/`.bas`/`.sol`/`.ctype`/`.meta`
-   wholesale, add only your payload.
+   wholesale, add only your payload. Reuse the *files*, not another generator's
+   *population* — gate the skip on your own generator's precondition.
 2. Serialize any structure CBC caches. Add `--rebuild-<thing>` and quantify the
-   difference rather than assuming there is none.
+   difference rather than assuming there is none. If the generator rebuilds
+   everything from the solver each call (as `CglZeroHalf::refreshSolver()` does),
+   there is nothing to serialize and reconstructing on load is what CBC itself
+   does — confirm that by reading the refresh, not by assuming either way.
 3. Write the replay bench: one CSV row per run, `--header`, `--quiet`, every knob
    a flag, **and a control flag that disables the expensive stage**.
 4. `--self-test` the serialization round-trip byte-exactly.
@@ -352,7 +427,9 @@ method 0).
    ceiling of the optimization you are considering.
 7. Exactness: all fields, as strings, all fixtures, **including the modes where a
    gate is true**. Use 0-cut fixtures as noise controls.
-8. Time serially, min-of-N, ranked by absolute time on the slow tail.
+8. Time serially, min-of-N, ranked by absolute time on the slow tail. Report the
+   slow tail as its own subtotal, cap reps on fixtures over ~20 s, and discard the
+   first read of a large fixture (page cache).
 9. `run-suite --after`; judge by PASS + confirmed optima; settle single instances
    at a fixed node limit with no `-sec`.
 10. Commit, and write up the negative results too.
