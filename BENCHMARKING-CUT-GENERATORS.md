@@ -405,6 +405,50 @@ against a literal transcription of the old loop on 40,000 randomized instances
 with heavy slack ties and pre-deleted rows *before* the C++ was written, which is
 far cheaper than discovering it from a fixture diff.
 
+### And for `CglProbing`
+
+| step | finding |
+|---|---|
+| Two cut kinds | first generator here emitting both `OsiRowCut` and `OsiColCut`, so the gate compares 28 fields; a change preserving only one kind still fails |
+| Stage profiling, level 1 | `probeCore` is **98%** of generator wall (median 94% per fixture). A location, not yet a target |
+| Levels 2 and 3 | `probeCore` → `wayCuts` 70.4% → `rowCutGen` 99.5% → **`upRows` 98.4%**, i.e. one loop is ~69% of the whole generator on `neos-4532248-waihi` |
+| Counters inside the loop | `guardPass` 100%, `gapLoScan` 98.6% (**1.72e9** full row scans), `cutBuilt` **0** |
+| Fix | row activity at `colsol` is loop-invariant — `colsol`'s last write precedes the probe nest. Cache it lazily per row |
+| Exactness | all 28 fields byte-identical over **292** fixtures (107 row cuts, 27 column cuts, 172 neither as noise controls) |
+| Speedup | **1.24x** over the slowest 40 of 339 fixtures; **1.26x** on the 15 over 1 s; **1.23x** on the 19 that find no cuts at all. Best 6.21x (`neos-2075418-temuka`, zero-cut), then 3.19x, 3.06x, 2.82x, 2.57x; worst 0.98x |
+| Whole solve | `-passC 1 -maxNodes 1`, no `-sec`: `neos-3402294-bobin` probing 0.157s→0.059s (0 cuts both), `trdnc` 0.325s→0.203s (864 cuts both); lower bound identical on both |
+| Negative results | five targets picked by reading the code, all dead: `tighten()` (0.08–0.53%), the `skipGenIntColCuts` save/restore (0.08–0.39%), candidate selection + sort (0.11–0.53%), skipping clean bound restores (99.9% are genuinely dirty), and hoisting the strengthening block on `ifCut` (`ifCutTrue` = 0 on every fixture) |
+
+Four transferable lessons, three of them new:
+
+**Profile until you reach a loop, not until you reach a function.** `probeCore` at
+98% is a true measurement that identifies nothing actionable — it is most of the
+generator by construction. The finding only became a change at level 3.
+
+**Nested levels need their own array and their own remainder.** Shares must be of
+the enclosing level; summing a child alongside its own parent double counts. The
+first version of this instrumentation made exactly that mistake. Use RAII scoped
+guards for sub-timers, too — regions inside loops that `continue`/`break` cannot
+use hand-placed END calls.
+
+**Entry counts are not iteration counts.** `downRows` and `upRows` recorded
+identical entry counts (86836) while differing **3950x** in iterations, because one
+loop's bound is capped and the other's is not. Count both, or the asymmetry that
+is the whole finding stays invisible. And at 1e9 scale use **counters, not
+timers**: a `CoinWallclockTime()` pair costs more than the body it measures.
+
+**One fixture is not a profile.** Across 9 slow-tail fixtures one stage ranged
+13.6%→96.8%, and one fixture inverted the leader's picture entirely. §5's warning
+about ranking by absolute time applies to attribution as well as to timing.
+
+A fixture-production lesson worth carrying: when an instance yields no fixture,
+suspect **root heuristics** before the time budget. The dump fires after
+preprocessing and the root LP, so an instance can clear both and still never reach
+the capture point — `scpj1` spent 2400s at 0 nodes and 0 LP iterations, and dumped
+in 38s with `-heuristicsOnOff off`. Record the resulting shape change in the
+`.meta` (no incumbent → infinite cutoff), because a fixture that is infinite for
+that reason is otherwise indistinguishable from one that found no incumbent.
+
 ---
 
 ## 9. Checklist for the next generator
@@ -425,6 +469,11 @@ far cheaper than discovering it from a fixture diff.
    nothing.
 6. Sweep the existing strategy knobs before writing any new code. Measure the
    ceiling of the optimization you are considering.
+6b. Profile down to a **loop**, not to a function — a stage at 98% of wall is a
+   location, not a target. Give each nested level its own array and remainder,
+   use RAII guards, count iterations *and* entries separately, and use counters
+   rather than timers at 1e9 scale. Then check the shares hold across the whole
+   slow tail: one fixture is not a profile.
 7. Exactness: all fields, as strings, all fixtures, **including the modes where a
    gate is true**. Use 0-cut fixtures as noise controls.
 8. Time serially, min-of-N, ranked by absolute time on the slow tail. Report the
