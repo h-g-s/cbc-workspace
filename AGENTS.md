@@ -418,6 +418,58 @@ a script/CI step. Instances present in only one of the two files (e.g. after
 reported separately and excluded from the aggregate/per-instance comparison.
 See `Cbc/test/compare-mip-sanity-results --help` for the full option list.
 
+### Ranking N≥2 large-scale benchmark experiments — `./compare-benchmarks`
+
+`./compare-benchmarks` (a symlink to `Cbc/test/compare_benchmarks.py`) is a
+Python port of mipster's `compare_multi_experiments.py` data model, for
+comparing **large-scale benchmark runs** (e.g. a full MIPLIB sweep, not just
+`mip-sanity-data`) across two or more experiment directories — for example,
+deciding between two solver parameter settings (`-trust 5` vs `-trust 10`):
+
+```sh
+./compare-benchmarks trust5=/path/to/exp_trust5 trust10=/path/to/exp_trust10
+./compare-benchmarks --verify a=/path/to/before b=/path/to/after   # + data-quality cross-check
+./compare-benchmarks --weights=my_weights.json a=... b=...          # tune cost weights
+```
+
+It auto-detects, per directory, either a mipster-style `summary.tsv` (self-
+contained best-known-solution column) or cbc-workspace's own `./test`
+`results.tsv` (BKS looked up from `Cbc/test/mip-sanity-data/bks.tsv`), then:
+
+- **Classifies every run** into `OPTIMAL` / `INFEASIBLE_CONFIRMED` /
+  `TIMEOUT_WITH_SOL` / `TIMEOUT_NO_SOL` / `OVERTIME` / `ERROR` / `WRONG`,
+  trusting the harness's own `solution_found`/`proven_infeasible`/
+  `timed_out` flags rather than "was an objective number printed" — Cbc
+  still prints an objective line for a **fractional LP relaxation** when no
+  integer-feasible solution was found ("Stopped ... (no integer solution -
+  continuous used)"), so that check alone is not reliable. `--verify`
+  cross-checks these flags against each other and warns on any
+  inconsistency (a problem with the *input files*, not with Cbc).
+- **Computes primal gap and dual gap against BKS separately** (never
+  folded into one number): primal = objective vs BKS, dual = dual bound vs
+  BKS — a run with a great incumbent but a weak proof, or vice versa, looks
+  very different under the two.
+- **Assigns a cost per instance and ranks the experiments** by average
+  cost (lower = better; ties broken by confirmed-optimal/-infeasible
+  count). Costs are **not hardcoded** — they come from
+  `Cbc/test/compare_benchmarks_weights.json` (`cost_solved`, `gap_cap`,
+  `cost_no_solution`, `cost_overtime`, `cost_error`, `cost_wrong`), so you
+  can re-run with `--weights=<file>` to see how sensitive a ranking is to,
+  e.g., how harshly "no solution found" is penalized relative to a real
+  gap, without touching any code.
+- Prints a per-experiment ranking table and a "biggest cost divergence"
+  instance spotlight (`--top-n`, default 20).
+
+`Cbc/test/compare_benchmarks_selftest.py` (`python3
+Cbc/test/compare_benchmarks_selftest.py`) unit-tests the classification/gap/
+cost logic against constructed edge cases (the fractional-relaxation trap
+above, an `OVERTIME` run with a transient-but-never-persisted incumbent, a
+validator-caught wrong answer) and, when a real large-scale benchmark
+experiment directory is present on the machine, cross-checks its own
+`n_solved` count against that experiment's independently-computed
+`report.txt` "solved/proved" line. See `./compare-benchmarks --help` (or the
+module docstring) for the full option list.
+
 ### Other projects
 
 Each of the other 4 projects has its own test suite (`make check` / `test/`

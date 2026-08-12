@@ -168,6 +168,33 @@ wider gap) and improvement, then exits non-zero if any regression was found
 `Cbc/test/compare-mip-sanity-results` for the full option list
 (`--gap-tol`, `--no-color`).
 
+### Ranking large-scale benchmark experiments — `compare-benchmarks`
+
+For comparing full-scale benchmark runs (e.g. a MIPLIB sweep across
+hundreds of instances, not just `mip-sanity-data`) across **two or more**
+experiment directories — say, deciding between `-trust 5` and `-trust 10` —
+use `./compare-benchmarks` (a symlink to `Cbc/test/compare_benchmarks.py`):
+
+```sh
+./compare-benchmarks trust5=/path/to/exp_trust5 trust10=/path/to/exp_trust10
+./compare-benchmarks --verify a=/path/to/before b=/path/to/after
+```
+
+It auto-detects a mipster-style `summary.tsv` or cbc-workspace's own
+`results.tsv` per directory, classifies every run (optimal / confirmed
+infeasible / timed-out-with-a-solution / timed-out-with-none / overtime /
+error / wrong-answer) — carefully distinguishing a real integer-feasible
+incumbent from the fractional relaxation Cbc still reports when none was
+found — computes primal and dual gap against the best-known solution
+separately, and ranks the experiments by an overall cost. The cost weights
+(how harshly a missing solution, an overtime kill, or a validator-caught
+wrong answer are penalized) live in
+`Cbc/test/compare_benchmarks_weights.json`, editable/overridable with
+`--weights=<file>` to see how sensitive the ranking is to those choices.
+`--verify` cross-checks the input files' own bookkeeping for
+inconsistencies. See `./compare-benchmarks --help` for the full option
+list, and `Cbc/test/compare_benchmarks_selftest.py` for its test suite.
+
 ## `update`
 
 ```sh
