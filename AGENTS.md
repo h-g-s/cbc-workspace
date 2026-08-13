@@ -470,6 +470,85 @@ experiment directory is present on the machine, cross-checks its own
 `report.txt` "solved/proved" line. See `./compare-benchmarks --help` (or the
 module docstring) for the full option list.
 
+### Detailed time/efficiency breakdown for ONE experiment — `./stats-analysis`
+
+`./stats-analysis` (a symlink to `Cbc/test/stats_analysis.py`) is a
+from-scratch port of mipster's `stats_analysis.py`, for drilling into
+**where the time went** inside a single benchmark experiment (as opposed to
+`compare-benchmarks`, which ranks *N≥2* experiments against each other).
+It reads the per-instance CSVs written by Cbc's own
+`-csvStatistics <file> -writeStatistics` (`./test --cut-stats` writes these;
+see `Cbc/src/CbcSolverStatistics.cpp`), either a single combined `stats.csv`
+or a directory of per-instance `*.stats.csv` files (auto-combined):
+
+```sh
+./stats-analysis --outdir /path/to/exp_trust5/
+./stats-analysis --statsfile /path/to/exp_trust5/stats.csv --top 20 --no-color
+./stats-analysis --outdir /path/to/exp_trust5/ --cut-breakdown   # + per-instance table
+```
+
+⚠️ **This is NOT a drop-in port** — mipster's version targets its own Cbc
+fork's stats-CSV schema, which differs from upstream Cbc's in ways that
+required real adaptation, not just column renaming:
+
+- **Cut generator columns are named `<GenName>_cuts`/`<GenName>_time`
+  directly** (e.g. `Clique_cuts`, `Gomory(2)_time`) — no `cut_` prefix, no
+  lowercasing, and **no `_calls`/`_avgnz` column exists at all** for any
+  generator (mipster's fork has these; upstream Cbc's `CbcSolverStatistics`
+  does not track them). `CUT_GENERATORS` in `stats_analysis.py` lists the
+  17 canonical names `CbcSolverStatistics::writeCsv` always writes,
+  independent of which generators actually fired for a given instance —
+  keep this list in sync with `canonicalGeneratorNames()` in
+  `Cbc/src/CbcSolverStatistics.cpp` if a generator is ever added/renamed
+  there (the same list is separately hardcoded in bash in
+  `run-mip-sanity-tests`'s `--cut-stats` aggregation — see below).
+- **No per-heuristic data exists upstream at all** (no `heur_*_time/_sols/
+  _execs` columns) — mipster's fork instruments individual heuristics;
+  this Cbc build does not. Rather than silently reporting "0s used" (which
+  would misleadingly imply heuristics are free), the Heuristics/Wasted-
+  heuristics sections detect the absence of these columns and print an
+  explicit "not available in this Cbc build" message; heuristic time is
+  simply folded into the time-budget's "Other" bucket. The code still
+  reads real `heur_*` columns if present, so a future Cbc build that adds
+  this instrumentation is picked up automatically with zero code changes.
+- **New "Presolve / tightening phases" section, not in mipster's version**,
+  covering columns this Cbc build tracks that mipster's schema doesn't:
+  conflict-graph construction (`cgraph_time`/`cgraph_density`), clique
+  strengthening (`clqstr_extended`/`clqstr_dominated`/`clqstr_time`),
+  coefficient tightening (`coefstr_changed`/`coefstr_rows`/`coefstr_time`),
+  and row reduction (`rowred_fixed`/`rowred_duplicate`/`rowred_parallel`/
+  `rowred_time`). These times are also folded into the time-budget
+  breakdown as their own bucket (not absorbed into "Other"). Note some
+  real older experiment directories (e.g. the `trust5`/`trust10` data used
+  to validate this port) predate the `rowred_*` columns entirely — the
+  loader treats genuinely-missing columns as 0 rather than erroring, so
+  older stats.csv files still analyze cleanly, just without that phase's
+  numbers broken out.
+- **No `rich` dependency** — mipster's version renders its tables with the
+  `rich` package (not installed in this environment); this port reimplements
+  plain/ANSI-colored fixed-width tables itself (`Report`/`Colors` classes),
+  matching the style already used by `compare_benchmarks.py`, so the only
+  dependency is `pandas` (already required elsewhere in this repo).
+
+This overlaps with, but does not duplicate, `run-mip-sanity-tests`'s own
+`--cut-stats`/`cut-stats.tsv` aggregation (a bash/awk one-shot summary of
+just the cut-generator columns, computed inline during a `./test` run for a
+quick at-a-glance total): `stats_analysis.py` is the deeper, standalone,
+re-runnable tool — full time-budget accounting across every phase, worst-
+instance ranking, wasted-time detection with instance-level drill-down —
+meant to be run separately, after the fact, against any stats.csv.
+
+`Cbc/test/stats_analysis_selftest.py` (`python3
+Cbc/test/stats_analysis_selftest.py`) unit-tests the column-handling edge
+cases above (missing `rowred_*` columns, missing heuristic columns, the
+`obj` "no solution" sentinel of `1.0e50` in `CbcSolverStatistics::obj`,
+per-row wasted-cut-time detection) and, when the real trust5 experiment
+directory is present on the machine, cross-checks that the time-budget
+buckets sum back to the raw CSV's own `time` column total and that
+`Probing` (this dataset's known largest cut-generator time consumer, per
+manual inspection) ranks above `Gomory`. See `./stats-analysis --help` (or
+the module docstring) for the full option list.
+
 ### Other projects
 
 Each of the other 4 projects has its own test suite (`make check` / `test/`

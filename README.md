@@ -195,6 +195,32 @@ wrong answer are penalized) live in
 inconsistencies. See `./compare-benchmarks --help` for the full option
 list, and `Cbc/test/compare_benchmarks_selftest.py` for its test suite.
 
+### Detailed time breakdown for ONE experiment — `stats-analysis`
+
+While `compare-benchmarks` ranks experiments *against each other*,
+`./stats-analysis` (a symlink to `Cbc/test/stats_analysis.py`) drills into a
+**single** experiment's own `-csvStatistics`/`-writeStatistics` output (see
+`./test --cut-stats`) to see *where the time actually went*:
+
+```sh
+./stats-analysis --outdir /path/to/exp_trust5/          # combines *.stats.csv if needed
+./stats-analysis --statsfile /path/to/exp_trust5/stats.csv --top 20
+./stats-analysis --outdir /path/to/exp_trust5/ --cut-breakdown  # + per-instance cut-time table
+```
+
+It reports, summed over every instance in the experiment: a time-budget
+breakdown (LP solve / cut generation / conflict-graph build / presolve
+&amp; tightening / everything else), a ranking of cut generators by time
+spent and cuts produced, which cut generators wasted the most time
+producing zero cuts (and on which instances), and the slowest instances
+overall. It is a from-scratch port of mipster's `stats_analysis.py`,
+rewritten against upstream Cbc's own fixed CSV schema (`CbcSolverStatistics
+::writeCsv`) — which differs from mipster's fork in column names, has no
+per-generator call-count/avg-nonzero columns, and has **no per-heuristic
+timing at all** (that section reports this limitation explicitly instead
+of a misleading "0s used"). No extra dependency beyond `pandas`. See
+`Cbc/test/stats_analysis_selftest.py` for its test suite.
+
 ## `update`
 
 ```sh
