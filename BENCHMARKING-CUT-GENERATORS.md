@@ -295,6 +295,32 @@ a fixture that takes minutes. `--reps=5` on a 30-minute baseline fixture spends
 two and a half hours refining a digit that will not move. `zh-serial.py` stops
 after one rep once a fixture exceeds 20 s, and five where it matters.
 
+**A bench's own bound measurement can dwarf what you are measuring, and then it
+sets the price of every repetition.** On `chromaticindex1024-7` the Gomory replay
+takes ~17 minutes, of which `sepTime` is **23.6 s and `resolveTime` is 1010 s** —
+the LP re-solve with 21,729 cuts of average length 701, i.e. 96% of the wall. Two
+consequences, and the second is the expensive one:
+
+- **Read the field, not the wall clock.** A 17-minute replay looks like a
+  catastrophic outlier and says nothing whatever about the generator.
+- **A serial min-of-3 costs an hour and a half to measure 70 seconds of work,**
+  which is how a fixture ends up timed under load instead — and that is exactly
+  how the false regression below was manufactured. `gomory-bench --no-bound`
+  skips the re-solve, turning a 17-minute rep into ~25 s; the whole min-of-3
+  then runs in 2.5 minutes. It reports `objImprove` as no movement by
+  construction, so it is for timing only and warns on stderr every time.
+
+**A "regression" on one fixture is a contention artifact until proven serially,
+and the bench prints its own control.** `chromaticindex1024-7` measured `sepTime`
+23.65 → 40.87 = **1.73x slower** in a run overlapping the validity sweep. But
+`resolveTime` — *identical code in both builds* — moved 1016 → 1396 = 1.37x in
+the same run, which is the tell: a field that cannot have changed, changing.
+Re-measured serially with `--no-bound`, min-of-3, nothing else on the machine:
+24.73 → 23.81 = **1.038x**, a mild *speedup*, with rowCuts 21729 and totalViol
+44523.41954 identical on all 6 reps. When a fixture disagrees with the rest of the
+population, look for a field in the same row that acts as an invariant before
+believing the number.
+
 **Report the slow tail as its own row.** An aggregate TOTAL is dominated by
 whichever single fixture is worst, so it flatters a change that fixes exactly one
 instance. A separate "fixtures over 1s" subtotal is what answers "did the slow
@@ -449,6 +475,59 @@ in 38s with `-heuristicsOnOff off`. Record the resulting shape change in the
 `.meta` (no incumbent → infinite cutoff), because a fixture that is infinite for
 that reason is otherwise indistinguishable from one that found no incumbent.
 
+### And for `CglGomory`
+
+| step | finding |
+|---|---|
+| Fixture precondition | first generator here where the `.bas` is **required, not provenance**: `needsOptimalBasis()` is true and the cut *is* a row of the tableau at that basis, so two optimal bases of one degenerate vertex give different valid cuts. A nonzero `warmStartIters` makes a replay incomparable, not merely noisy |
+| Stage profiling | the dense nonbasic-column loop, 80–97% of separation on the fixtures first sampled |
+| Why it is safe to skip columns | the BTRAN result's dense array is exactly 0.0 off-index, so an untouched column's alpha is exactly 0.0 and the loop's own `fabs(value)<1.0e-16` already discards it. Checked with a stray-nonzero counter, not assumed: **0** on every fixture |
+| Fix | scatter through the row copy over the `numberInArray` nonzero rows, mark the columns reached, skip the rest — **gated** on a cost comparison both sides of which are known before either is paid |
+| Speedup (serial, min-of-3) | slow tail (10 fixtures over 1 s) **12.39x**, 11.01x over 20; best `neos-2075418-temuka` 175.6s → 6.4s = **27.27x**, then 28.19x on `tutaki`; worst `scpl4` 0.0774s → 0.0857s = 0.90x, i.e. **8 ms** absolute — the gate holds losses to noise |
+| Exactness | **331 fixtures, 0 differences**: every cut coefficient as exact IEEE hex (`--dump-cuts`, `%a`) plus every non-timing CSV field. ~11.3M coefficients, 49,728 row cuts and 30 column cuts. Column cuts are in the comparison because a Gomory cut over one column is a *bound*, so a row-only check would miss a class of change |
+| Validity | Osi row-cut debugger against proven optima on the instances where Gomory actually cuts: **`OK=172 VIOLATION=0 RESTART=10 SKIP=43`** over all 225 where it fires at the root. Since the change is bit-identical this is evidence about `CglGomory` itself, not about the change |
+| Negative result | **the unconditional form of the same fix is a 100x regression** (`scpm1` colLoop 0.139s → 15.23s) |
+| False alarm, resolved | `chromaticindex1024-7` read 1.73x *slower* under load; serially it is **1.038x faster**. See the contention trap in §5 — `resolveTime` moved in the same run, and it cannot |
+
+Three lessons, all of them about measuring rather than about Gomory:
+
+**A sparse rewrite of a dense loop is not automatically a win, and the losses are
+enormous.** Net saving as a fraction of dense element count ranges from +0.9994 to
+**−202** across 56 fixtures. The `scp*`, `eil*` and `square*` families lose because
+their tableau rows are dense enough that nearly every column is touched anyway, so
+the scatter is pure overhead on top of a walk that still happens. What makes the
+gate exact rather than a guess is that *both* costs are computable in advance:
+Σ`rowLength` over the nonzero rows against Σ`columnLength` over nonbasic-movable
+columns, the latter loop-invariant. Ship the gate, and check the distribution is
+bimodal so the threshold is not load bearing.
+
+**Instrumentation inside the loop you are measuring lands in the residual, not in
+the stage.** A 90–97% "unattributed" residual (`scpn2`: total 185.8 s, stages
+summing 5.57 s) was entirely the profile build's own sizing block, which is
+O(numberRows + rowSupport) *per candidate* — 9.26e9 element visits on `scpm1`.
+Being outside every timed *stage* is not the same as being outside the loop. The
+consequence was worse than a wrong percentage: it put `scpn2` and `scpm1` at the
+top of the slow tail when their true separation times are ~4.3 s and ~1.6 s, so
+the ranking that drives everything downstream was wrong. Time the enclosing loop
+as its own region and require `stages + instrumentation ≈ loop`, or the residual
+tells you nothing about where it lives.
+
+**Know the floor before quoting a ceiling.** The outer loop over all
+`numberColumns` cannot be made sparse without changing which cuts are produced —
+`if (number>limit) break;` makes the visit order decide the cut, and `rhs`
+accumulates across it — so its cost bounds any exactness-preserving speedup. That
+bound is a median **21%** of the inner element work and on 11 of 327 fixtures the
+outer loop *dominates* (`cvs16r128-89` 69x, `chromaticindex1024-7` 1.3x, where
+both builds exceed a 300 s cap identically). Compute that floor from the `.meta`
+before optimizing, so a fixture that cannot improve is not mistaken for the change
+misfiring.
+
+And a third instance of the same mistake, which is why §5 says it twice: the
+three-fixture sample that justified building this reported ratios of 2.75x–147x;
+the population is **0.32x–1740x**. The same three fixtures also put the outer loop
+at 0.6–1.4% when the median is 21%. Two wrong conclusions from one convenience
+sample.
+
 ---
 
 ## 9. Checklist for the next generator
@@ -474,6 +553,17 @@ that reason is otherwise indistinguishable from one that found no incumbent.
    use RAII guards, count iterations *and* entries separately, and use counters
    rather than timers at 1e9 scale. Then check the shares hold across the whole
    slow tail: one fixture is not a profile.
+6c. Time the **enclosing loop** as its own region and require that stages plus
+   instrumentation account for it. Instrumentation inside the loop lands in the
+   residual, and "outside every timed stage" is not "outside the loop" — this
+   put two fixtures at the top of a slow tail they did not belong in.
+6d. Before optimizing, compute from the `.meta` the cost of the part you are
+   **not allowed to change**. That is the floor on any speedup, and a fixture
+   sitting on its floor is not the change misfiring.
+6e. If the fix is "do the sparse thing instead of the dense thing", price the
+   sparse thing's own cost on the whole population first. Both costs are usually
+   computable before either is paid, which turns a heuristic into a gate — and
+   the unconditional form was a 100x regression in the one case tried here.
 7. Exactness: all fields, as strings, all fixtures, **including the modes where a
    gate is true**. Use 0-cut fixtures as noise controls.
 8. Time serially, min-of-N, ranked by absolute time on the slow tail. Report the
