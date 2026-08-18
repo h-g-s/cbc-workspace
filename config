@@ -216,6 +216,52 @@ validate_opts() {
   [[ "$ARCH" == "x86_64"  ]] || OPT_AVX2=0
 }
 
+# ── Sanitizer runtime availability check ──────────────────────────────────────
+# On Fedora (and other RPM distros that split the sanitizer runtimes out of
+# the base gcc package), `-fsanitize=address/thread/undefined` can fail to
+# *link* even though the compiler otherwise works fine, because
+# libasan.so/libtsan.so/libubsan.so's actual .so.N.N.N file is missing (only
+# a linker script placeholder under /usr/lib/gcc/... is installed). Without
+# this check that surfaces, many minutes later, as a baffling "C compiler
+# cannot create executables" failure deep inside CoinUtils's own `configure`
+# (autoconf's very first sanity check), with no hint that the real cause is
+# a missing sanitizer runtime rather than a broken toolchain. Catch it here,
+# upfront, with a precise fix.
+check_sanitizer_runtime() {
+  local sanflag pkgname
+  case "$OPT_SANITIZER" in
+    asan)  sanflag="address"   ; pkgname="libasan"  ;;
+    tsan)  sanflag="thread"    ; pkgname="libtsan"  ;;
+    ubsan) sanflag="undefined" ; pkgname="libubsan" ;;
+    *) return 0 ;;  # none / valgrind don't link a sanitizer runtime
+  esac
+
+  local tmpout out rc=0
+  tmpout="$(mktemp /tmp/cbc-config-santest.XXXXXX)"
+  out="$(printf 'int main(void){return 0;}\n' \
+    | "$DETECT_CC" -fsanitize="$sanflag" -x c - -o "$tmpout" 2>&1)" || rc=$?
+  rm -f "$tmpout" a.out 2>/dev/null
+  (( rc == 0 )) && return 0
+
+  echo "${RED}✗ The C compiler ('${DETECT_CC}') cannot link a -fsanitize=${sanflag} test program:${RESET}" >&2
+  echo "${out}" | sed 's/^/    /' >&2
+  echo "" >&2
+
+  # Only the "runtime .so is missing" case is actionable with a package
+  # install; anything else (e.g. sanitizer unsupported by this compiler at
+  # all) gets the raw error above and no guessed fix.
+  if [[ "$out" == *"cannot find"* && "$out" == *"${pkgname#lib}"* ]] \
+     && [[ -f /etc/os-release ]] \
+     && grep -qiE '^ID(_LIKE)?=.*(fedora|rhel)' /etc/os-release; then
+    echo "${YELLOW}  This looks like Fedora with the '${pkgname}' runtime package not installed" >&2
+    echo "  (its .so isn't pulled in by the base 'gcc' package). Install it with:${RESET}" >&2
+    echo "" >&2
+    echo "    sudo dnf install ${pkgname}" >&2
+    echo "" >&2
+  fi
+  exit 1
+}
+
 # ── ASLR workaround for TSan on aarch64 ────────────────────────────────────────
 # On aarch64 kernels with high mmap ASLR entropy, ThreadSanitizer aborts any
 # instrumented binary (including configure's own conftest probes) with
@@ -1206,6 +1252,10 @@ main() {
     run_tui
     printf '\n\n'   # ensure output starts below TUI dialog residue
   fi
+
+  # Run after the TUI (interactive mode may be the one that actually chose
+  # OPT_SANITIZER) but before anything tries to configure/build with it.
+  check_sanitizer_runtime
 
   build_flags
   build_configure_opts
