@@ -349,6 +349,17 @@ limit with **no** `-sec`, where before/after agree exactly. That is how `pk1` wa
 settled: at a fixed 20,000-node limit the baseline alone yields 3.34643 / 3.40616
 / 3.9845, bracketing the changed binary's 3.41647.
 
+**And an identical node count is not evidence of an identical search when the run
+stopped *on* the node limit** — the counts match because the limit is the stopping
+rule, so the agreement is trivial while the bound reached by that node is still
+wall-clock dependent. The Twomir run made this concrete: of the 9 instances whose
+gap moved, **8 had byte-identical node counts** and different final bounds, which
+reads like a deterministic behavior change and is not one. Re-run at a fixed
+`-maxNodes` with **no `-sec`** and `-threads 0`; all 9 then agreed on objective
+*and* lower bound to every printed digit. One of them, `markshare_4_0`, had looked
+alarming — gap `0.0000% → 1539320000000000.0000%` — purely because its bound moved
+from exactly `0` to `-4.55e-13` and the gap formula divides by it.
+
 Also: `run-suite` must be run against a binary that actually contains the change.
 `./build` does not descend into `Cbc/test/`, and a make-built test binary links
 the **installed** CoinUtils/Cgl/Clp/Osi — see `CLAUDE.md`. `cmp` two binaries: if
@@ -527,6 +538,115 @@ three-fixture sample that justified building this reported ratios of 2.75x–147
 the population is **0.32x–1740x**. The same three fixtures also put the outer loop
 at 0.6–1.4% when the median is 21%. Two wrong conclusions from one convenience
 sample.
+
+### And for `CglTwomir`
+
+| step | finding |
+|---|---|
+| Fixture precondition | the `.bas` is required as it is for Gomory, **plus two preconditions no other generator here has**. `freeColumns > 0` makes `generateCuts` return at `CglTwomir.cpp:118` with no cuts at all — so the Gomory population cannot be reused wholesale. And `twomirCandidates == 0` is **not** a valid skip, unlike Gomory: `do_form_` builds bases from formulation rows and needs no fractional basic integer. A Gomory-shaped skip would have silently dropped 3 formulation-only fixtures |
+| Population scan, before touching the generator | **85 of 357** instances keep TwoMir alive past the first root pass. 168 never add the row to the generator table at all; 102 add it and are then killed by `setSwitchOffIfLessThan(1)`. Conflating "row absent" with "row present, 0.00 s" would have put the population at 187 |
+| Sizing gate (§5) | 30 instances ≥ 1.0 s (needs 15), population total 202.9 s (needs 60 s), top-20 = 161.8 s = **80%** of it (needs 50%). All three pass, so the optimization is in scope. Those are parallel-harness times and are quoted only as a *gate*, never as a result |
+| Stage attribution without instrumentation | `setCutTypes(mir, twomir, tab, form)` partitions the generator into four independently gateable stages, so the four floors come from flags rather than from a profile scaffold. `--no-tab --no-form` is the per-call floor (`DGG_getData`, empty emit loop, `DGG_freeData` — **no `CoinFactorization` is built at all**, it is local to `DGG_generateTabRowCuts`); `--no-mir --no-2mir` sets `t_max = t_min-1` / `q_max = q_min-1` so the loop bodies never run while factorization and every `DGG_getTableauConstraint` still do, isolating exactly the tableau-row cost |
+| Why it is safe to skip columns | the same claim as Gomory's, at a **1.0e-12** threshold rather than 1e-16 (`CBC_CHECK_CUT` is defined at `CglTwomir.hpp:341`), which makes a stray value *more* likely to survive the filter, not less. Measured with a stray-nonzero counter over **333 fixtures**: 9,125,148,323 skipped columns examined, **0 with alpha exactly nonzero**, 0 surviving the filter, worst \|alpha\| among the skipped **exactly 0.0**. The loose threshold turns out not to be load-bearing at all |
+| Fix | scatter through the row copy over the `numberInArray` nonzero BTRAN rows, stamp the columns reached, skip the inner element loop for the rest — gated on `4·scatter < dense` with both sides known before either is paid, `dense` cached per call because it depends only on the basis. `-DCGL_TWOMIR_DENSE_COLLOOP` restores the original |
+| The gate is exercised in both directions | 245,536 scatter calls against 68,108 dense calls; **100 fixtures take both branches**, 146 are all-sparse and 93 all-dense. Without that split a "0 differences" exactness result would not distinguish a correct gate from a gate that is constantly false |
+| Speedup (serial, min-of-3) | slow tail (5 fixtures over 1 s on base) **1.98x**, **1.95x** over the 30 hottest (39.73 s → 20.32 s); best `neos-4647030-tutaki` 0.696 s → 0.052 s = **13.30x**; hottest `trdcrooms` 19.68 s → 8.62 s = 2.28x while emitting the same 4945 row cuts; worst `neos-933966` 1.00x and **nothing below 1.00x**; median 1.51x, 25 of 30 at ≥ 1.2x. `rowCuts_n`, `colCuts_n`, `objImprove` and `warmStartIters` matched on all 30 — a speedup on a changed cut set is not a speedup. Measured on an idle machine with BLAS threads pinned (see the trap below) |
+| Exactness | **333 fixtures × 4 stage configurations, 0 differences, 223,152 cuts compared**: every coefficient as exact IEEE hex (`--dump-cuts`, `%a`) in generation order, both row and column cuts, plus every non-timing CSV field as a string (58 of 61, the three timing columns dropped **by name**). Default 108,194 cuts / `--no-form` — the tab stage, where the fix lives — 98,252 / `--no-tab` 16,706 / `--no-mir --no-2mir` **0**, a pure noise control that by construction compares nothing and is reported as such rather than counted. The `2mir_test:` line count was 0 on both sides in all four. One fixture is **not** in that count: `z26` exceeds 900 s per side *identically* on both binaries, and it is outside the addressable population anyway (`twomirPresent = 0`, so CBC never separates it) |
+| Validity | Osi row-cut debugger against proven optima over every instance where Twomir emits row **or** column cuts: of 216 derived instances, **`OK=164 VIOLATION=0 RESTART=8 SKIP=44 OTHER=0`**. Report the coverage split or a pass count overstates itself: **142 of the OKs actually exercised TwoMir cuts, 70,780 cuts checked**; the other 22 are zero-coverage passes where the TwoMirCuts row was absent from the run. The 44 SKIPs are 38 "the reference is the relaxation, not a feasible point" and 6 "feasible reference, fixed LP infeasible after preprocessing"; a SKIP is never a pass. **`nu25-pr12` ran and passed with real coverage** (`OK twomirCuts=168`) — the instance that matters, since the roundoff guard at cpp:414-420 exists because a TwoMirCuts cut on it once excluded the certified optimum by ~1.14e-6. Because the change is bit-identical, this is evidence about `CglTwomir` itself, not about the change |
+| Negative result | **three of the four fixtures that did not speed up are cases where the gate refused the scatter**, not cases where the change failed: `neos-933966` took 4 scatter calls against 1571 dense, `satellites2-60-fs` 33/927, `mcsched` 0/1259. Without those per-call branch counts all three read as the change misfiring. The fourth, `comp07-2idx` (1303 scatter / 0 dense, 1.04x), is **not** explained — two candidate mechanisms were measured and both refuted: its tab stage is essentially 100% of its runtime, so no other stage dominates, and 77.3% of its candidate columns *were* skipped, a **higher** selectivity than `buildingenergy`, which gained 2.34x. Recorded as unattributed rather than given an unmeasured mechanism; it is a 0.1 s fixture and immaterial to the aggregate |
+| Regression suite | **500/500 PASS and 330 confirmed optima on both sides**, 0 failures, 0 errors, 0 overtime. `compare-mip-sanity-results` still exited 1, on 4 wider and 5 narrower gaps; all 9 were settled to exact agreement at a fixed `-maxNodes` with no `-sec` and `-threads 0`. Judge by PASS count and confirmed optima, as §6 says |
+| False alarm, resolved | `markshare_4_0` reported its gap widening from `0.0000%` to `1539320000000000.0000%`. Same 90913 nodes, same objective 7, `is_optimal = 0` on both sides: the bound moved from exactly `0` to `-4.55e-13` and the gap formula divides by it. The 8 same-node-count cases are covered by the trap in §6 |
+
+Twomir-specific traps, each of which would have produced a wrong number or a
+wrong write-up:
+
+**A generator can be disabled before it can cost anything, and the scan must say
+which.** `switches=1` maps to `setSwitchOffIfLessThan(1)`, so 0 row cuts on the
+first root pass sets `whenCutGenerator_ = -100` and `nextRunStr` reports
+`"disabled"` for the rest of the solve. That is a *different fact* from a row that
+was never added, and the two differ by 102 instances here. Record `twomirPresent`
+and the verbatim `Next run` string separately, and parse
+`printGeneratorTable` (`CbcOutput.cpp:2160-2207`) — the legacy
+`"was tried %d times and created %d cuts"` string survives only in
+`Cbc/src/Attic/CbcSolver.cpp` and will never match.
+
+**Two unconditional `printf`s, and their count is evidence.**
+`2mir_test: why does constraint not exist ?` at `CglTwomir.cpp:1588` and an
+unprefixed copy at :1637 are not debug-gated. Filtering them before `cmp` is
+obvious; **comparing how many were filtered** is the part that matters, because a
+change in that count is itself a behavior change. On this population it is 0 on
+every fixture in every configuration.
+
+**`setAway`/`setAwayAtRoot` silently ignore out-of-range values rather than
+clamping** (`if (value>0.0&&value<=0.5)`, cpp:2248-2263). A bench that echoes its
+own variable will report `awayAtRoot 0.6` while the generator ran 0.005. Echo the
+getter. The same shape bites `setFormulationRows`, whose `form_nrows_` is written
+and never read — the generator uses `info.formulation_rows`, so the setter is dead
+and the `--self-test` asserts that it is.
+
+**A default can live in another generator's `#ifdef`.** `awayAtRoot = 0.005`
+rather than 0.01 only because `#define MORE_CUTS` sits at
+`CbcSolverCutSetup.cpp:139`, inside the *Gomory* block, and is never `#undef`'d.
+Deriving the fixture's `cbc*` values by reading Twomir's own constructor would
+have got this wrong by 2x.
+
+**`--pass=0` is the only comparable call, for three independent reasons.**
+`max_elements` becomes `getNumCols()` at pass 0 (cpp:297-303) and 250 or 50000
+never applies; `do_tab_` is additionally gated on `info.level < 1 && info.pass < 6`
+(cpp:314), so pass ≥ 6 is a structurally *different* call rather than a cheaper
+one; and the kill switch judges exactly this call, so the population defined here
+is the population that survives. A replay bench with `--rounds>1` must warn when
+the effective pass reaches 6.
+
+**`TWOMIR_LESS_MALLOC` cannot be used as an A/B control** — `intVar` is declared
+at cpp:761 inside the `#ifdef` and used at :802 outside it, so the off state does
+not compile. And `#undef DGG_DEBUG_DGG` at cpp:31 kills every `#if DGG_DEBUG_DGG`
+block despite hpp:250 defining it 1, which makes `DGG_isConstraintViolated`
+(2134-2153) dead twice over: every branch returns 0 *and* its only caller is under
+the `#undef`.
+
+**"Serial" timing is not serial if the bench links a threaded BLAS.**
+`twomir-bench` pulls in `libopenblas.so.0` through Clp, and a single run measured
+**372% CPU** — the LP resolve is multi-threaded even when the harness runs one
+fixture at a time. `sepTime` brackets only single-threaded Cgl code so the metric
+itself is sound, but the wall-clock around it is not reproducible unless BLAS
+threads are pinned. Pin them, and keep timing off a machine running anything else.
+
+**A whole-solve scan and a single-call bench measure different quantities — not
+the same quantity at two noise levels.** The scan's `twomirTime` is what the
+generator spent across the entire solve; the bench's `sepTime` is one root pass-0
+call. On this population the two differ by far more than contention could explain:
+`trdcrooms` 40.7 s scanned against 19.68 s serially, `academictimetablesmall`
+2.08 → 0.20, `trdnc` 1.80 → 0.058. Ranking the hot set by scan time is
+therefore legitimate, and is exactly what the sizing gate does — but quoting a
+scan *magnitude* as a separation cost is not, and the two must never be
+differenced. That is why the gate row above says its numbers are a gate and never
+a result.
+
+**The floor is `outerLoopWork`, and the ratio to it is a ceiling — not a
+pass/fail test.** The emission contract is that structural entries appear in
+increasing `j`, and `CoinSort_2` at cpp:1099 re-sorts **only the slack tail**, so
+the `for j < ncol` sweep must stay dense and ordered; only the inner element loop
+may be skipped. `tabRowWork / outerLoopWork` is therefore the headroom, and it
+reduces algebraically to `nonbasicStructuralNz / cols` — the mean number of
+nonzeros per nonbasic structural column (verified identical on all 334 fixtures,
+so either form may be quoted). Read it as a rough ceiling of **`1 + ratio`**, in
+units where visiting an element and testing a column cost the same, which they do
+not. It is **not** the case that a ratio below 1 means the fixture cannot improve:
+`chromaticindex512-7`, at **0.751** and the second most expensive instance in the
+population, gained **1.37x** against a ceiling of about 1.75x. Publish the
+distribution from the `.meta` before quoting any ratio, but compare each fixture
+against its own ceiling rather than against 1.
+
+**Known defect, deliberately left alone.** `DGG_add2stepToList` shadows its loop
+variable `i` (1918 / 1940 / 1947), truncating the alpha search to exactly one
+candidate — so `best_rc_alpha == best_norm_alpha` always, and :1953-1957 compares
+that one candidate against `COIN_DBL_MAX`. Fixing it changes which cuts are
+produced and fails every exactness gate by construction, so it is its own
+experiment judged on `objImprove`, never folded into a speedup. Same reasoning
+retires the `DGG_CHECKRVAL(rval, rval)` leaks at :1803/:1814/:1830/:1841 and the
+double `DGG_build2step` at :1935/:1959: real, but fixing them under cover of a
+perf change misreports the change.
 
 ---
 
