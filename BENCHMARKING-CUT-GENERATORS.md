@@ -638,15 +638,124 @@ population, gained **1.37x** against a ceiling of about 1.75x. Publish the
 distribution from the `.meta` before quoting any ratio, but compare each fixture
 against its own ceiling rather than against 1.
 
-**Known defect, deliberately left alone.** `DGG_add2stepToList` shadows its loop
-variable `i` (1918 / 1940 / 1947), truncating the alpha search to exactly one
-candidate — so `best_rc_alpha == best_norm_alpha` always, and :1953-1957 compares
-that one candidate against `COIN_DBL_MAX`. Fixing it changes which cuts are
-produced and fails every exactness gate by construction, so it is its own
-experiment judged on `objImprove`, never folded into a speedup. Same reasoning
-retires the `DGG_CHECKRVAL(rval, rval)` leaks at :1803/:1814/:1830/:1841 and the
-double `DGG_build2step` at :1935/:1959: real, but fixing them under cover of a
-perf change misreports the change.
+**Known defect, held out of the speedup and then measured separately.**
+`DGG_add2stepToList` shadows its loop variable `i` (1918 / 1940 / 1947),
+truncating the alpha search to exactly one candidate — so
+`best_rc_alpha == best_norm_alpha` always, and :1953-1957 compares that one
+candidate against `COIN_DBL_MAX`. Fixing it changes which cuts are produced and
+fails every exactness gate by construction, so it became its own experiment
+judged on `objImprove` (below), never folded into the speedup. The same reasoning
+still retires the `DGG_CHECKRVAL(rval, rval)` leaks at :1803/:1814/:1830/:1841
+and the double `DGG_build2step` at :1935/:1959: real, but fixing them under cover
+of a perf change misreports the change.
+
+#### The 2-step alpha search, as its own experiment
+
+The first cut-set-changing experiment in this document, so the metric hierarchy
+of §1 does the deciding rather than an exactness gate. Kept strictly after the
+bit-identical work was green, and in its own commit.
+
+| step | finding |
+|---|---|
+| The defect, quantified before being judged | `DGG_build2step` copies every element of `base` unconditionally, so `cut->nz == base->nz`; after the inner scoring loops `i == base->nz`, the outer `i++` goes past the bound and the loop exits. Giving the inner loops their own `j` changes the emitted cut in **8,576 calls, 30.70% of the 27,939 productive ones** — of 201,771 total, since 173,832 build no candidate at all and are unaffected. Quantifying the blast radius first is what made the objImprove result interpretable |
+| One of the two selection rules cannot fire, and reading the code does not show it | `rc_val = rhs · min_j(\|rc_j\|/coeff_j)` is a valid lower bound on the objective improvement the cut forces, and the code minimizes where bigger is better — an inverted bound. But the `> 1E-6` gate passed in **0 of 293,767 candidates and 0 of 27,939 productive calls** over 333 fixtures. The cause is not the sign of `rhs` (positive in 65.66%): the minimum itself is **0 in 92.44%**, because the row's own pivot column is admitted by `\|\| j==index`, is basic so its reduced cost is 0 by definition, and always receives `tau·rho ≥ DGG_MIN_RHO`. `rhs > 0 AND min > 0` holds in **exactly 0**. So the inversion is real and moot, and V1 (fix) against V2 (fix + maximize) is **333/333 bit-identical**. A rule that has never selected cannot be validated by measurement — ship the existing direction, put the other behind `-DCGL_TWOMIR_ALPHA_RC_MAX`, and say why |
+| The surviving rule's approximation is better than the exact criterion | minimizing `Σ_{coeff>1E-6} coeff²/(rhs²+1)` maximizes `rhs/\|\|coeff\|\|`, the violation distance, with two departures: negative coefficients (which `DGG_build2step` does emit) are omitted from the norm, and the `+1` distorts scale for small `rhs`. Scoring the exact distance instead (`-DCGL_TWOMIR_ALPHA_DIST`) is **worse: 6 better, 14 worse**, −**3.78** once the single largest mover is excluded, +4.09%/6 against −**27.43%**/14 scale-free, and it reverses the fix's five best wins almost one for one. **REJECTED.** "The formula is mathematically wrong" was a false lead; the approximation correlates better with realized bound improvement |
+| Result **in isolation**, on the replay bench | one CglTwomir call against one stored root LP. `objImprove` over 333 fixtures: **19 better, 9 worse, 305 unchanged**, total +12.37, **+4.87 excluding the largest mover** (`50v-10`). Scale-free the wins sum to **+82.70% against −8.74%** of losses — **9.5x** — best `d05100` **+36.96%**, worst `bupa.sc` −2.99%. Winners are the set-covering and knapsack families. `rowCuts_n` +58, reported and never ranked by |
+| Result **in a real solve**, which is what governs the claim | the root dual bound after CBC's whole root cut loop, `cbc -maxNodes 1`, over all **500** mip-sanity instances, so branching plays no part: **identical 222, better 84, worse 82**, plus 51 proved-at-root (bound incomparable) and 61 where TwoMir is never reached. Over the 166 comparable movers, as a share of the root cut loop's own gain: mean **−0.52%**, median **+0.003%**. A coin flip. So the shipped claim is **correctness fix, measured-neutral on dual bound** — not the improvement the isolated number suggests |
+| Why the two disagree, and it is not noise | the bench measures TwoMir alone against one LP; in a solve its cuts compete with seven other generators over as many as **100 passes**, so a locally better 2-step cut changes what Gomory/Knapsack/MIR find next. Splitting the movers on whether either side hit that cap separates the regimes cleanly — **pass-capped n=133: 65/68, mean −1.27%, median −0.044%**; **converged n=32: 18/14, mean +2.61%, median +0.583%**. Where the loop stops by its own criterion the fix is mildly positive (`rout` +29.6%, `nu25-pr12` +20.1%, three `cttp_hard` +15…21%); where it is truncated the bound records where the trajectory happened to stop |
+| Regression suite | **500/500 PASS on both sides**, 330 → **335** confirmed optima, with `./build` on each side. Reported, not leaned on — see the cliff trap below: 14 instances gained proven optimality, 11 lost it, and **all 25 sit on the `-maxNodes = 3 × calibrated_nodes` cliff** |
+| The proxy pointed the other way | `totalViol` moved **−370 while `objImprove` rose**, and on the rejected variant **+219 while it fell**. Two independent instances of the pre-resolve proxy contradicting the metric that decides, in one experiment. Use it to explain, never to choose |
+| Composing runs instead of paying for one | `objImprove` is **bit-reproducible per (binary, fixture)** — CglTwomir reads no clock — verified as 0 mismatches on the shared column across two independent 333-fixture runs. So `base → dist` was composed from the `base → fix` and `fix → dist` logs rather than costing a third ~40-minute run |
+| Validity | re-run in full, because here the verdict **is** evidence about the change: `OK=163 VIOLATION=0 RESTART=8 SKIP=44 OTHER=1` over the same 216 instances. **`nu25-pr12` — the instance the cpp:414-420 roundoff guard exists for — improved**: `twomirCuts=191` and optimality **proven** at obj=53905, where the pristine tree emitted 168 and did not prove it |
+| Cost, bounded before it was measured | every guard before `DGG_build2step` is a `continue`, so the 173,832 calls that build no candidate scanned the full `base->nz` before the fix and cost the same after it. Only productive calls pay more: **~272k additional `DGG_build2step` + scoring passes** at O(nz ≤ 500), roughly 1e8 element visits across the whole population. Then measured, serially on a verified-idle machine: **66 fixtures 37.6939 → 37.5940 s = 1.00x**; the 40 fixtures whose cut set changed 9.6374 → 9.8386, **+0.2012 s, 0.98x**. The predicted O(nz) → O(nz²) is real and invisible, because `base->nz > 500` is rejected outright at cpp:1592 |
+
+**The suite's confirmed-optima count is a tree-shape statistic, not a bound
+measurement.** `limits.tsv` sets `-maxNodes = 3 × calibrated_nodes`, so every
+instance whose node count is within 3x of its calibration sits on a cliff, and
+**any** change to the cut set flips a batch of them — in both directions at once.
+Here 14 gained proven optimality and 11 lost it, and all 25 are on that cliff:
+`mod008` is capped at 18 nodes with a baseline of 6, and `p0201` is capped at 132
+with the after-run terminating at exactly 132. The +5 net looked like the
+headline result and is not a result at all. **The fix is to measure the root
+bound instead**: `cbc <mps> -sec N -maxNodes 1 -solve` prints
+
+```
+✔ Cut generation complete — N cuts, obj A → B in P passes
+```
+
+where `B` is the dual bound after the root cut loop. It is the suite-side
+analogue of the bench's `objImprove`, it does not depend on branching at all, and
+because cuts only ever move the bound one way, `sign(B − A)` identifies the
+improving direction per instance without needing to know the objective sense.
+`.claude/local/cutgen-harness/suite-rootbound.py` runs it over both binaries.
+Deliberately parallel — these are bound *values*, not timings — but never quote a
+time out of it, and re-run solo any instance whose root loop was long enough for
+`-sec` to truncate it.
+
+**An instance that finishes at the root has no comparable root bound, and the
+number CBC prints for it is nonsense.** Once the incumbent is known the root LP
+carries a cutoff constraint; if it goes infeasible that *proves* optimality, and
+the reported post-cut bound is garbage. `rcpsp_n8_r2_s137` reads
+`obj 21.8226 → 142873` on the pristine tree against a true optimum of **32**, and
+`gt2` reads 23145.8. Both binaries return the optimum on both. Taken at face
+value that one row was a −142838 "catastrophe" and single-handedly dominated the
+aggregate; it is in fact the fix *replacing* a nonsense bound with a plausible
+35.49. **Filter on the result line, not on the magnitude** — 51 of 500 instances
+are in this class here, and a magnitude filter would have kept the sign backwards
+while looking principled.
+
+**A pass-capped bound moves chaotically, so partition on the cap before reading
+the aggregate.** CBC's root cut loop stops at 100 passes. On the 133 instances
+that hit it the fix is 65 better / 68 worse; on the 32 that converge it is 18/14
+with a median of +0.583%. Same change, same metric, and only the second group is
+measuring cut quality — in the first, the final bound is an artifact of where the
+trajectory was interrupted. `gesa2` goes 26 → 100 passes and `gesa2_o` 100 → 28
+under the same edit, which is the mechanism visible in one line of output.
+
+**Min-of-N does not protect a serial timing run from sustained load.** This
+generalizes §1's "never time under the parallel scripts": the *first* clean-looking
+serial run here reported **1.04x overall with a 1.37x outlier**, taken while a
+500-instance root-bound sweep was still running at 8 workers. Re-run on a verified-
+idle machine the same comparison is **1.00x** and the outlier is gone. Min-of-3
+removes transient spikes and cannot remove a contended machine, because every rep
+is contended. Check the machine is idle *before* the run, not the variance after
+it. **The noise floor comes free if the population contains bit-identical
+fixtures**: the 26 fixtures whose cut set did not change pay every extra
+`DGG_build2step` pass and emit the same cuts, so they can only be slower — they
+came out **1.01x faster**, which fixes this measurement's own floor at ~1% and
+puts the real +0.2012 s cost at or below it.
+
+**Prove a baseline binary's provenance by `cmp`, not by remembering how you built
+it.** These builds are bit-reproducible, so the A/B pair is checkable in one step:
+save the candidate binary, revert the source, build the baseline, restore the
+source, rebuild, and `cmp` the rebuild against the saved candidate. Byte-identical
+means the baseline really was built from HEAD and the two binaries differ in
+nothing else. Both canaries passed here; the check costs one extra `./build` and it
+is the difference between an A/B and a story about an A/B. Note also that
+`run-suite` never rebuilds `libCbc`, so an "after" run without `./build` silently
+solves against the pristine binary.
+
+**A `*-validate-cuts` verdict is wall-clock limited, so a class change between two
+batch runs is not by itself evidence about the code.** The harness runs
+`mip-debug-cuts` at a 600 s limit with `JOBS=5` and `--threads=1`, so how deep a
+solve gets — and therefore whether it ever reaches CBC's *aborting* debugger check
+— depends on machine load. Exactly one instance moved here, `supportcase7`
+`OK → rc=134`, and it looked like a violation the change had introduced. Run
+**solo under both binaries**, the pristine tree aborts too, with a
+**byte-identical invalid-cut stream**: 718 reports, the first
+`(580th in this go, pass 1)`, every one `Cut generator 0 (Probing)` and none
+TwoMir. Two further attributions come free from that stream: 80 of the violations
+are at **root pass 1**, where Probing (generator 0) runs *before* TwoMir and no
+TwoMir change can reach them; and the cut is invalid only against a **dirty
+reference** — `col 4599 coef=-94687 knownVal=8.994209762e-08` gives LHS
+−0.0088987 against `lb=-5.8e-11`, and the `.sol` carries 103 nonzero entries
+below 1e-6 in 965 lines. Re-run solo and `cmp` the streams; it settles in one
+step what three repeat batch runs could not.
+
+**Note also that `[pre-resolve check]` prints without aborting.** It is a
+diagnostic at `CbcModel.cpp:11190-11245`; only CBC's own check aborts. So a run
+can log hundreds of reference violations and still exit `OK`, and the two facts
+must be read separately — the count of printed violations is not the verdict.
 
 ---
 
@@ -691,4 +800,9 @@ perf change misreports the change.
    first read of a large fixture (page cache).
 9. `run-suite --after`; judge by PASS + confirmed optima; settle single instances
    at a fixed node limit with no `-sec`.
+9b. If the change alters the cut set, the suite is not enough: its confirmed-optima
+   count moves on the `3 × calibrated_nodes` cliff and is a tree-shape statistic.
+   Measure the **root bound** at `-maxNodes 1` over the whole population, exclude
+   instances that finish at the root (their bound is nonsense), and partition on
+   the 100-pass cap before reading the aggregate.
 10. Commit, and write up the negative results too.
