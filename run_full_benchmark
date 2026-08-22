@@ -95,6 +95,14 @@
 #   --env KEY=VAL        Extra environment variable for each run (repeatable)
 #   --opts FLAG          Extra CBC flag before -solve (repeatable)
 #                        e.g. --opts "-rens 1000" --opts "-rounding both"
+#   --gap-rel-tol PCT    Relative tolerance used when cross-checking a claimed-
+#                        optimal objective against the best-known value
+#                        (default: 1e-4, matching cbc's own default ratioGap)
+#   --gap-abs-tol VAL    Absolute tolerance for the same check (default: 1e-6,
+#                        matching cbc's own default allowableGap). Together
+#                        these ensure a solution cbc reports as "Optimal
+#                        solution found (within gap tolerance)" is never
+#                        flagged as WRONG_OBJ/INVALID_SOL.
 #   --dry-run            Print commands without executing them
 #   -h, --help           Show this help message and exit
 #
@@ -121,7 +129,7 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 REPO_ROOT="$SCRIPT_DIR"
 
 show_help() {
-  sed -n '2,95p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,109p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
@@ -139,6 +147,8 @@ EXTRA_ENV=()
 CBC_EXTRA_OPTS=()
 DRY_RUN=0
 PATTERNS=()
+GAP_REL_TOL_OVERRIDE=""
+GAP_ABS_TOL_OVERRIDE=""
 
 # ── Parse arguments ───────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -155,6 +165,8 @@ while [[ $# -gt 0 ]]; do
     --vg-supp)        VG_SUPPS+=("$2");         shift 2 ;;
     --env)            EXTRA_ENV+=("$2");        shift 2 ;;
     --opts)           CBC_EXTRA_OPTS+=("$2");   shift 2 ;;
+    --gap-rel-tol)    GAP_REL_TOL_OVERRIDE="$2"; shift 2 ;;
+    --gap-abs-tol)    GAP_ABS_TOL_OVERRIDE="$2"; shift 2 ;;
     --dry-run)        DRY_RUN=1;                shift   ;;
     -h|--help)        show_help; exit 0                 ;;
     -*) echo "Unknown option: $1" >&2; exit 1  ;;
@@ -162,8 +174,28 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# ── Objective-vs-reference tolerances ─────────────────────────────────────────
+# REL_TOL/ABS_TOL feed cbc_validate_sol's generic numerical-correctness checks
+# (-p primal feasibility, -i integrality, -o recomputed-vs-claimed objective) —
+# these are independent of the solver's own MIP gap and stay at a conservative
+# 1e-4 regardless of cbc's gap defaults.
+#
+# GAP_REL_TOL/GAP_ABS_TOL are the tolerances used when cross-checking a
+# claimed-optimal objective against mip-sanity-data's best-known value (both
+# in this script's own ref_allows_obj/gap_vs_ref helpers and via
+# --bks-pct-tol/--bks-abs-tol passed to cbc_validate_sol). They default to
+# exactly cbc's own default gap tolerances (ratioGap=1e-4, allowableGap=1e-6 —
+# see Cbc/src/CbcParameters.cpp), so that a solution cbc legitimately reports
+# as "Optimal solution found (within gap tolerance)" — i.e. one that stopped
+# on the gap rather than proving exact optimality — is never misclassified as
+# WRONG_OBJ/INVALID_SOL: by construction cbc only stops early when
+# |incumbent - bestPossible| <= max(ratioGap * |obj|, allowableGap), and since
+# the true optimum lies between those two bounds, the reported objective is
+# guaranteed to be within that same tolerance of the reference value.
 REL_TOL=1e-4
 ABS_TOL=1e-4
+GAP_REL_TOL="${GAP_REL_TOL_OVERRIDE:-1e-4}"
+GAP_ABS_TOL="${GAP_ABS_TOL_OVERRIDE:-1e-6}"
 
 # ── Locate the cbc executable (same resolution order as ./test) ──────────────
 CBC_BIN=""
@@ -278,12 +310,14 @@ ASLR_WRAP_STR="${ASLR_WRAP[*]+"${ASLR_WRAP[*]}"}"
 
 export CBC_BIN VALIDATOR OUTDIR THREADS TIMELIMIT OVERTIME_GRACE INSTANCES_DIR MIPS_DIR BKS_FORMAT
 export VG_TOOL VG_SUPPS_STR EXTRA_ENV_STR CBC_EXTRA_OPTS_STR ASLR_WRAP_STR
-export REL_TOL ABS_TOL DRY_RUN USE_COLOR CBC_STATS_MODE
+export REL_TOL ABS_TOL GAP_REL_TOL GAP_ABS_TOL DRY_RUN USE_COLOR CBC_STATS_MODE
 
-# ── Helper: objective within tolerance of an exact reference ─────────────────
+# ── Helper: objective within the gap tolerance of an exact reference ─────────
+# Uses GAP_REL_TOL/GAP_ABS_TOL (cbc's own gap defaults, see above), not the
+# generic REL_TOL/ABS_TOL used for cbc_validate_sol's numerical checks.
 obj_ok() {
   local got="$1" ref="$2"
-  awk -v got="$got" -v ref="$ref" -v rtol="$REL_TOL" -v atol="$ABS_TOL" \
+  awk -v got="$got" -v ref="$ref" -v rtol="$GAP_REL_TOL" -v atol="$GAP_ABS_TOL" \
     'BEGIN {
        diff = got - ref; if (diff < 0) diff = -diff
        absref = ref < 0 ? -ref : ref
@@ -299,11 +333,11 @@ ref_allows_obj() {
   if [[ "$kind" == "best_known" ]]; then
     case "$sense" in
       min)
-        awk -v got="$got" -v ref="$ref" -v rtol="$REL_TOL" -v atol="$ABS_TOL" '
+        awk -v got="$got" -v ref="$ref" -v rtol="$GAP_REL_TOL" -v atol="$GAP_ABS_TOL" '
           BEGIN { tol = rtol * ((ref<0)?-ref:ref); if (atol>tol) tol=atol; exit (got <= ref + tol) ? 0 : 1 }'
         return ;;
       max)
-        awk -v got="$got" -v ref="$ref" -v rtol="$REL_TOL" -v atol="$ABS_TOL" '
+        awk -v got="$got" -v ref="$ref" -v rtol="$GAP_REL_TOL" -v atol="$GAP_ABS_TOL" '
           BEGIN { tol = rtol * ((ref<0)?-ref:ref); if (atol>tol) tol=atol; exit (got + tol >= ref) ? 0 : 1 }'
         return ;;
     esac
@@ -314,7 +348,7 @@ export -f ref_allows_obj
 
 gap_vs_ref() {
   local got="$1" ref="$2" kind="$3" sense="$4"
-  awk -v got="$got" -v ref="$ref" -v kind="$kind" -v sense="$sense" -v rtol="$REL_TOL" -v atol="$ABS_TOL" '
+  awk -v got="$got" -v ref="$ref" -v kind="$kind" -v sense="$sense" -v rtol="$GAP_REL_TOL" -v atol="$GAP_ABS_TOL" '
     function abs(x) { return x < 0 ? -x : x }
     BEGIN {
       absref = abs(ref); tol = rtol * absref; if (atol > tol) tol = atol
@@ -535,7 +569,10 @@ run_instance() {
   # ── Validate solution with cbc_validate_sol ────────────────────────────────
   local validation_failed=0 validation_msg=""
   if [[ $solution_found -eq 1 && -f "$solutionfile" && -x "$VALIDATOR" ]]; then
-    local val_args=(-p "$ABS_TOL" -i "$ABS_TOL" -o "$REL_TOL")
+    local gap_pct_tol
+    gap_pct_tol=$(awk -v r="$GAP_REL_TOL" 'BEGIN { printf "%.10g", r * 100.0 }')
+    local val_args=(-p "$ABS_TOL" -i "$ABS_TOL" -o "$REL_TOL"
+      --bks-abs-tol "$GAP_ABS_TOL" --bks-pct-tol "$gap_pct_tol")
     if [[ "$exp_status" == "optimal" || "$exp_status" == "infeasible" ]]; then
       val_args+=(--expected-status "$exp_status")
     fi
