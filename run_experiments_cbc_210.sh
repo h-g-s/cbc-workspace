@@ -146,6 +146,11 @@ done
 
 REL_TOL=1e-4
 ABS_TOL=1e-4
+# Cbc 2.10 prints .sol variable values with only ~6-8 significant digits, so
+# rows summing many large-magnitude terms can show a spurious multi-unit
+# activity "violation" from print rounding alone, not a real infeasibility
+# (see cbc_validate_sol's --row-scale-tol). Scale by 1e-6 to absorb that.
+ROW_SCALE_TOL=1e-6
 
 echo "==> Using cbc (2.10 stable): $CBC_BIN"
 
@@ -233,7 +238,7 @@ CBC_EXTRA_OPTS_STR=$(printf '%s\n' "${CBC_EXTRA_OPTS[@]+"${CBC_EXTRA_OPTS[@]}"}"
 
 export CBC_BIN VALIDATOR OUTDIR TIMELIMIT OVERTIME_GRACE INSTANCES_DIR MIPS_DIR BKS_FORMAT
 export ALLOWABLE_GAP RATIO_GAP CBC_EXTRA_OPTS_STR
-export REL_TOL ABS_TOL DRY_RUN USE_COLOR
+export REL_TOL ABS_TOL ROW_SCALE_TOL DRY_RUN USE_COLOR
 
 # ── Helper: objective within tolerance of an exact reference ─────────────────
 obj_ok() {
@@ -388,6 +393,20 @@ run_instance() {
   local result_line
   result_line=$(grep '^Result - ' "$logfile" | tail -1 || true)
 
+  # Fallback: infeasibility/unboundedness detected during preprocessing/cut
+  # generation (e.g. "Pre-processing says infeasible or unbounded") makes
+  # Cbc 2.10 exit 0 without ever printing a "Result - ..." line to the log,
+  # even though it still writes a .sol file whose own header carries the
+  # real status (e.g. "Integer infeasible - objective value ..."). Without
+  # this fallback such runs were silently misclassified as NO_SOLUTION.
+  if [[ -z "$result_line" && -f "$solutionfile" ]]; then
+    local sol_header
+    sol_header=$(head -1 "$solutionfile")
+    if echo "$sol_header" | grep -qi 'infeasible\|unbounded'; then
+      result_line="Result - $sol_header"
+    fi
+  fi
+
   local proven_infeasible=0
   echo "$result_line" | grep -qi 'infeasible' && proven_infeasible=1
 
@@ -424,7 +443,7 @@ run_instance() {
   # ── Validate solution with cbc_validate_sol ────────────────────────────────
   local validation_failed=0 validation_msg=""
   if [[ $solution_found -eq 1 && -f "$solutionfile" && -x "$VALIDATOR" ]]; then
-    local val_args=(-p "$ABS_TOL" -i "$ABS_TOL" -o "$REL_TOL")
+    local val_args=(-p "$ABS_TOL" -i "$ABS_TOL" -o "$REL_TOL" --row-scale-tol "$ROW_SCALE_TOL")
     if [[ "$exp_status" == "optimal" || "$exp_status" == "infeasible" ]]; then
       val_args+=(--expected-status "$exp_status")
     fi
