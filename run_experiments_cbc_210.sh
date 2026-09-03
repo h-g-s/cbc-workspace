@@ -146,6 +146,22 @@ done
 
 REL_TOL=1e-4
 ABS_TOL=1e-4
+# GAP_REL_TOL/GAP_ABS_TOL are the tolerances used when cross-checking a
+# claimed-optimal objective against mip-sanity-data's best-known value (in
+# this script's own ref_allows_obj/gap_vs_ref helpers) — as opposed to
+# REL_TOL/ABS_TOL above, which feed cbc_validate_sol's generic numerical-
+# correctness checks (-p/-i/-o) and stay at a conservative 1e-4 regardless.
+# They default to exactly the -ratioGap/-allowableGap values this script
+# forces on every Cbc invocation (see ALLOWABLE_GAP/RATIO_GAP above), so that
+# a solution Cbc legitimately reports as "Optimal solution found (within gap
+# tolerance)" — i.e. one that stopped on the gap rather than proving exact
+# optimality — is never misclassified as WRONG_OBJ: by construction Cbc only
+# stops early when |incumbent - bestPossible| <= max(ratioGap * |obj|,
+# allowableGap), and since the true optimum lies between those two bounds,
+# the reported objective is guaranteed to be within that same tolerance of
+# the reference value. (Matches ./run_full_benchmark's GAP_REL_TOL/GAP_ABS_TOL.)
+GAP_REL_TOL="$RATIO_GAP"
+GAP_ABS_TOL="$ALLOWABLE_GAP"
 # Cbc 2.10 prints .sol variable values with only ~6-8 significant digits, so
 # rows summing many large-magnitude terms can show a spurious multi-unit
 # activity "violation" from print rounding alone, not a real infeasibility
@@ -238,12 +254,12 @@ CBC_EXTRA_OPTS_STR=$(printf '%s\n' "${CBC_EXTRA_OPTS[@]+"${CBC_EXTRA_OPTS[@]}"}"
 
 export CBC_BIN VALIDATOR OUTDIR TIMELIMIT OVERTIME_GRACE INSTANCES_DIR MIPS_DIR BKS_FORMAT
 export ALLOWABLE_GAP RATIO_GAP CBC_EXTRA_OPTS_STR
-export REL_TOL ABS_TOL ROW_SCALE_TOL DRY_RUN USE_COLOR
+export REL_TOL ABS_TOL GAP_REL_TOL GAP_ABS_TOL ROW_SCALE_TOL DRY_RUN USE_COLOR
 
 # ── Helper: objective within tolerance of an exact reference ─────────────────
 obj_ok() {
   local got="$1" ref="$2"
-  awk -v got="$got" -v ref="$ref" -v rtol="$REL_TOL" -v atol="$ABS_TOL" \
+  awk -v got="$got" -v ref="$ref" -v rtol="$GAP_REL_TOL" -v atol="$GAP_ABS_TOL" \
     'BEGIN {
        diff = got - ref; if (diff < 0) diff = -diff
        absref = ref < 0 ? -ref : ref
@@ -259,11 +275,11 @@ ref_allows_obj() {
   if [[ "$kind" == "best_known" ]]; then
     case "$sense" in
       min)
-        awk -v got="$got" -v ref="$ref" -v rtol="$REL_TOL" -v atol="$ABS_TOL" '
+        awk -v got="$got" -v ref="$ref" -v rtol="$GAP_REL_TOL" -v atol="$GAP_ABS_TOL" '
           BEGIN { tol = rtol * ((ref<0)?-ref:ref); if (atol>tol) tol=atol; exit (got <= ref + tol) ? 0 : 1 }'
         return ;;
       max)
-        awk -v got="$got" -v ref="$ref" -v rtol="$REL_TOL" -v atol="$ABS_TOL" '
+        awk -v got="$got" -v ref="$ref" -v rtol="$GAP_REL_TOL" -v atol="$GAP_ABS_TOL" '
           BEGIN { tol = rtol * ((ref<0)?-ref:ref); if (atol>tol) tol=atol; exit (got + tol >= ref) ? 0 : 1 }'
         return ;;
     esac
@@ -274,7 +290,7 @@ export -f ref_allows_obj
 
 gap_vs_ref() {
   local got="$1" ref="$2" kind="$3" sense="$4"
-  awk -v got="$got" -v ref="$ref" -v kind="$kind" -v sense="$sense" -v rtol="$REL_TOL" -v atol="$ABS_TOL" '
+  awk -v got="$got" -v ref="$ref" -v kind="$kind" -v sense="$sense" -v rtol="$GAP_REL_TOL" -v atol="$GAP_ABS_TOL" '
     function abs(x) { return x < 0 ? -x : x }
     BEGIN {
       absref = abs(ref); tol = rtol * absref; if (atol > tol) tol = atol
