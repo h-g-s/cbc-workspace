@@ -111,16 +111,25 @@ preprocessed, and `CbcStrategyDefault::setupOther()` only preprocesses when
 that is requested, so it is a no-op here beyond setting
 `numberStrong_`/`numberBeforeTrust_`.
 
-**Known gap vs. full CLI fidelity:** `CbcStrategyDefault::setupHeuristics()`
-attaches a smaller, fixed heuristic set (rounding + a diving heuristic) than
-the full `cbc` command line's default configuration, which
-`babExecuteSearchAndPostprocess` in `CbcSolver.cpp` assembles heuristic by
-heuristic from dozens of individually-toggled CLI options (feasibility pump,
-RINS, local search, ...). For root-processing experiments that specifically
-compare *cut generator* strategies this does not matter (cuts are unaffected);
-for heuristic-strategy experiments that need exact CLI parity, extend
-`ReplayStrategy::setupHeuristics()` in `mip-root-replay.cpp` to add the
-specific heuristics under study.
+**Resolved: full CLI heuristic parity.** `mip-root-replay` attaches heuristics
+via `doHeuristics(&model, 1, params, ...)` (`CbcSolverHeuristics.hpp`) -- the
+exact function `CbcSolver::configureHeuristics()` calls for the real `cbc`
+command line -- rather than `CbcStrategyDefault::setupHeuristics()`'s much
+smaller fixed set (rounding only). `CbcParameters()`'s default constructor
+self-initializes with the real CLI's default parameter values with no
+dependency on a `CbcSolver` instance, so this is a faithful baseline
+(Feasibility Pump on, RINS/diving/greedy on, Feasibility Jump off, ...), not a
+hand-picked subset. Pass `--minimal-heur` to fall back to the old bare-rounding
+`CbcStrategyDefault` behavior instead (e.g. to isolate pure cut-generator
+effects from any heuristic activity at all).
+
+On top of this real-default baseline, `mip-root-replay` exposes fine-grained
+Feasibility Jump (FJ) / Feasibility Pump (FPump) tuning knobs as CLI flags,
+each overriding one `CbcParameters` value: `--fpump=on|off`,
+`--fj=off|on|before|both`, `--fj-after-fpump=0|1`, `--fj-effort=N`,
+`--fj-effort-mult=N`, `--fj-stall=N`, `--fj-max-sol=N`, `--fj-only-no-sol=0|1`,
+`--fj-max-calls=N`, `--fj-depth=N` (see `--help` for defaults/meaning of
+each). This is what the FJ tuning sweeps below are built on.
 
 Reports, per replay: rows/cols/warm-start iterations/load time, then nodes
 explored, proven-optimal/infeasible, best possible bound, best solution value
@@ -138,3 +147,181 @@ explored, proven-optimal/infeasible, best possible bound, best solution value
 3. Judge changes the same way `BENCHMARKING-CUT-GENERATORS.md` prescribes:
    bound improvement on reoptimizing (never cut count) for cut generators;
    primal bound / time-to-first-solution for heuristics.
+
+## Fixture collections: quick-sanity vs. hard set
+
+Two distinct instance collections are used for root-fixture experiments, and
+picking the right one for the question at hand matters:
+
+- **`mip-sanity-data`** (`Cbc/test/mip-sanity-data`, 500 instances, `bks.tsv`
+  schema `instance status objective sense source`): fast, self-contained,
+  good for pipeline smoke-testing and quick iteration -- but mostly *easy*
+  instances, so heuristic/cut effects that only show up under real
+  difficulty (e.g. "can we even find a feasible solution at all?") are
+  under-represented. 442/500 produce root fixtures via pass 1 alone (the
+  other 58 are expected skips).
+- **The "hard set"**, `~/inst/miplib/2017+spp/` (385 real MIPLIB-derived
+  instances, `bks.tsv` schema `instance bks` -- note the *different* column
+  layout from mip-sanity-data's, see the BKS-lookup note below): this is the
+  representative set for judging root/first-16-node dual/primal-bound
+  improvements, per the standing direction to focus on hard instances rather
+  than quick sanity checks. `gen-root-fixtures` hardcodes its data directory
+  layout to `$DATA_DIR/mips`, so point it at a new collection via a
+  `mips -> <collection>` symlink wrapper directory (e.g.
+  `Cbc/test/.miplib2017spp-datadir/mips -> ~/inst/miplib/2017+spp`) rather
+  than modifying the script. Fixtures are stored in a
+  `rootFixtures/` subfolder of the collection itself (e.g.
+  `~/inst/miplib/2017+spp/rootFixtures/`) so they are naturally reused across
+  every future experiment on this set without regenerating.
+  Pass 1 (600s/instance) got 257/385; `--pass2` (3h + LP racing) recovered 81
+  more (338/385 total); the remaining ~47 are either expected skips (root
+  LP/preprocessing solves the problem outright) or 7 true stragglers where
+  even the pass-2 budget wasn't enough (root LP/preprocessing itself too
+  hard) -- rerun `--pass2` again only if a future need justifies an even
+  larger budget for those specific 7.
+
+**BKS schema is not uniform across collections** -- always check
+`head -1 bks.tsv` for a new collection before trusting column positions.
+`mip-root-replay`'s BKS lookup detects the objective column by header name
+(`"bks"` or `"objective"`), falling back to column index 1 only for an
+unlabeled 2-column file.
+
+## Methodology for a rigorous strategy-sweep experiment
+
+This is the pattern used for the Feasibility Jump (FJ) tuning experiment
+(2026-09, see results below) and is meant to be reused for future root/
+first-16-node cut-generator or heuristic studies:
+
+1. **Validate the pipeline on `mip-sanity-data` first.** Any bug in the
+   sweep/summarize scripts is far cheaper to catch on a 442-fixture, few-
+   minutes-per-config run than mid-way through an hours-long hard-set sweep.
+   Only move to the hard set once found-rate/gap numbers look sane (e.g. a
+   `no_heur` config should score much worse than the real-CLI-default
+   baseline; gap stats should not be `nan`/blow up to absurd magnitudes).
+2. **Stage the sweep, one question per stage, each gated on the previous
+   stage's winner:**
+   - *Stage 1 -- "when/whether to trigger":* compare on/off and
+     alternative-trigger-point variants (e.g. FJ at root vs. FJ as an
+     FPump-failure fallback vs. FJ replacing FPump entirely) at `--nodes=1`
+     (root only), isolating the heuristic-trigger question from any B&B
+     tree effects.
+   - *Stage 2 -- "how much effort per call":* fix the stage-1 winner, sweep
+     effort-budget and iteration-count/repeat-count knobs, still at
+     `--nodes=1`.
+   - *Stage 3 -- "where else in the tree":* fix the stage-1/2 winners,
+     switch to `--nodes=16` (the "first 16 nodes" target), and sweep
+     tree-recursion knobs (e.g. call the heuristic again every N levels,
+     gated on "no incumbent yet" vs. unconditionally).
+3. **Metrics, in priority order for primal-bound/heuristic work** (mirrors
+   the user's stated priorities: reach root fast, strong dual bound, good
+   primal bound, and -- specifically called out as important -- *some*
+   feasible solution at all, since without one there is no upper bound and
+   the whole search degrades):
+   - `found_pct` -- fraction of instances with *any* incumbent after the
+     replay. This is the primary metric when the baseline's found-rate is
+     well under 100% (as it is on the hard set) -- a config that raises
+     found-rate from 46% to 66% matters more than one that shaves 2% off an
+     already-found solution's gap.
+   - `avg_gap_bks_pct` -- **only averaged over instances where a solution was
+     found** (never conflate "no solution" with "0% gap" or drop those rows
+     silently either -- report `n_gap_samples` alongside so a reader can see
+     the denominator). Use a **normalized/bounded gap formula**,
+     `100 * |obj-bks| / max(|obj|,|bks|,eps)`, not a pure
+     relative-to-bks-only formula (`100*|obj-bks|/|bks|`) -- the latter
+     explodes to absurd magnitudes (seen: >13,000% average) on instances
+     with a near-zero BKS (e.g. the `markshare` family, bks in {1,14};
+     `mushroom-best`, bks~0.055). This is the same convention
+     `compare_benchmarks.py` already uses elsewhere in this repo, for
+     consistency across tools.
+   - `n_optimal` -- how many replays proved optimality within the node/time
+     budget (rare at `--nodes<=16`, but worth tracking; a config that
+     silently *drops* a previously-proven-optimal instance is a red flag).
+   - `avg_bbtime_s` / `total_bbtime_s` -- efficiency check: a config that
+     wins on found-rate/gap but multiplies runtime is a much weaker result
+     than one that wins for free or even runs faster (e.g. finding an
+     incumbent earlier can tighten cutoffs and shorten the remaining B&B).
+4. **Always run detached (`nohup ... & disown`), never a plain background
+   shell job**, for any sweep expected to take more than a few minutes --
+   session interruptions must not lose hours of compute. Log to a file and
+   poll it, do not rely on capturing the terminating shell's stdout.
+5. **Never edit a sweep script while an already-launched instance of it is
+   still running.** GNU parallel workers re-read the script file from disk
+   as they spawn; editing it mid-run can corrupt the currently-executing
+   invocation's control flow (observed: a stray extra pass through all
+   configs, printing garbage/`command not found` errors, after an in-place
+   edit to `fj-tune-sweep.sh` while its outer loop was still alive). Let a
+   running sweep finish (or kill it first, explicitly, by PID) before
+   changing the script, then relaunch.
+6. **Guard every per-instance worker call with a hard wall-clock `timeout`**
+   (e.g. `timeout --kill-after=10 "$((SECS+60))s" ...`) in addition to
+   whatever time limit the tool itself claims to enforce
+   (`--sec=`/`setMaximumSeconds()`). A tool's own time check only fires
+   between polling points (e.g. between B&B node evaluations); a single
+   heuristic call on a large/numerically hard fixture can overrun it
+   substantially (observed: one instance ran 9+ minutes against a 10s
+   `--sec` budget), stalling an entire parallel sweep. `timeout` gives
+   generous headroom above the requested budget rather than killing right
+   at the target, so genuinely-slow-but-finishing runs still get recorded.
+
+## FJ tuning results (2026-09, hard-set: `~/inst/miplib/2017+spp`, 259-300
+## fixtures depending on stage/pass-2 progress at run time)
+
+Baseline throughout: the real CLI default heuristic set via `doHeuristics()`
+(Feasibility Pump on, Feasibility Jump off).
+
+**Stage 1 -- when/whether to trigger FJ** (`--nodes=1`):
+
+| config | found% | optimal | avg_gap_bks% | avg_time(s) |
+|---|---|---|---|---|
+| baseline (FPump only) | 46.3 | 3 | 19.0 | 14.9 |
+| `--fj=on` | 64.5 | 4 | 23.1 | 15.7 |
+| `--fj=on --fj-after-fpump=1` | **66.0** | 4 | 23.3 | 15.9 |
+| `--fj=on --fpump=off` | 64.9 | 4 | 23.0 | 16.2 |
+| `--fj=off --fpump=off` (no heuristics) | 46.3 | 3 | 18.7 | 15.9 |
+
+FJ is the dominant lever for the "no feasible solution at root" problem on
+hard instances: FPump alone performs no better than no heuristics at all
+(46.3% found both), while adding FJ (any variant) raises found-rate by
++18-20pp. The FPump-failure fallback (`--fj-after-fpump=1`, seeding FJ from
+FPump's best failed rounded iterate) is the best variant and is the winner
+carried into stages 2/3.
+
+**Stage 2 -- effort budget / iteration count** (`--nodes=1`, on top of the
+stage-1 winner; grid: `--fj-effort-mult` in {256,512,1024,2048,4096} x
+`--fj-max-sol` in {1,2,4}):
+
+Found-rate rises marginally 256->512->1024 (64.5%->64.9%->65.65%) then is
+**exactly flat** at 1024/2048/4096 (identical found-rate, gap, and timing) --
+FJ already converges within its default 1024x-NNZ effort budget on this
+instance set; more budget never helps. `--fj-max-sol` (1 vs. 2 vs. 4) has
+**zero effect** at every effort level tested. Conclusion: the shipped
+defaults (`effort_mult=1024`, `max_sol=1`) are already at or past the point
+of diminishing returns for these two knobs -- no retuning indicated.
+
+**Stage 3 -- tree-recursive FJ calls** (`--nodes=16`, on top of the stage-1/2
+winners; grid: `--fj-depth` in {0(root-only),2,4,8} x
+`--fj-only-no-sol` in {0,1}):
+
+| config | found% | optimal | avg_gap_bks% | avg_time(s) |
+|---|---|---|---|---|
+| root-only (`--fj-depth=0`) | 62.0 | 9 | 25.9 | 37.4 |
+| depth=2/4/8, gated (only-no-sol=1) | 63.0 | 9 | 26.2-26.7 | 37.7-38.5 |
+| depth=2/4, ungated | 63.0 | 9 | 26.9 | 36.1-36.6 |
+| depth=8, ungated | 62.0 | 9 | 25.8 | 33.9 |
+
+Calling FJ again at fixed tree depths only adds +1pp found-rate over
+root-only, with no clear winner among depths/gating -- noise-level given
+n=300. Most of FJ's value is already captured by the single root-level call;
+tree-recursive calls in the first 16 nodes are not worth the added
+complexity on this evidence.
+
+**Overall**: no changes to CBC's shipped FJ/FPump defaults are indicated by
+this sweep -- they were already well-tuned for this metric/instance set. The
+clear, actionable result is the FPump-fallback wiring itself (point (d) in
+the FJ integration plan), which is what raises found-rate from ~46% to ~66%
+at root and is already committed.
+
+Reproduce or extend: `Cbc/test/fj-tune-sweep.sh --configs=<tsv> --outdir=<dir>
+--fixture-dir=<fixtures> --data-dir=<collection> --nodes=<1|16> --sec=<N>
+--jobs=<N>`, then `Cbc/test/fj-tune-summarize.py <outdir> <configs.tsv>`. See
+`Cbc/test/fj-configs-stage{1,2,3}.tsv` for the exact configs above.
