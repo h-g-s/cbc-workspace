@@ -353,10 +353,14 @@ default 500) and small candidate counts
 (`< CBC_CUTPOOL_FILTER_MIN_CANDIDATES`, default 20) are exempt, since
 filtering only pays for itself with many candidates to choose among. An
 optional parallelism/orthogonality secondary filter
-(`CBC_CUTPOOL_FILTER_MAX_PARALLELISM`, default 1.0/disabled) and an
+(`CBC_CUTPOOL_FILTER_MAX_PARALLELISM`, default **0.7**) and an
 always-filter override (`CBC_CUTPOOL_FILTER_ALWAYS=1`, bypasses both gates,
 for A/B testing) round out the env-var surface -- same naming pattern as
-`CglBKClique`'s `CBC_CLIQUE_POOL_*` vars.
+`CglBKClique`'s `CBC_CLIQUE_POOL_*` vars. Unlike `CglBKClique`'s own
+clique-cut parallelism filter (disabled by default, since an earlier sweep
+found no net win there), `0.7` ships enabled by default here, since the
+sweep below found it the single best-performing variant for these four
+generators specifically.
 
 **Sweep**: `Cbc/test/cutfilter-sweep` (forked from `cutskip-sweep`, same
 full-CLI-per-(config,instance) approach) against `Cbc/test/cutfilter-configs.tsv`,
@@ -400,14 +404,22 @@ consistent across every config -- pre-existing, unrelated to this change).
   user's "perhaps extend rounds to compensate" hypothesis was directionally
   correct and is the most promising follow-on to validate on the hard set
   before considering a shipped-default change to `passCuts`.
-- **Shipped defaults were left unchanged** (`MIN_COLS=500`,
-  `MIN_CANDIDATES=20`, `MAX_PARALLELISM=1.0/disabled`, matching
-  `CglBKClique`'s own precedent) pending a hard-set (`~/inst/miplib/2017+spp`)
-  confirmation -- `mip-sanity-data`'s small/easy instance mix is good for
-  pipeline validation (which it did: no errors introduced, numbers directionally
-  sane) but under-represents the large/many-cut-candidate instances this
-  feature specifically targets, per the same caveat noted for the FJ tuning
-  work above.
+- **Shipped defaults**: `MIN_COLS=500`/`MIN_CANDIDATES=20` are kept
+  unchanged, matching `CglBKClique`'s own precedent -- these are gates, not a
+  tunable "how aggressive" knob, and the conservative small-model exemption
+  is deliberate regardless of instance mix. `MAX_PARALLELISM`, however, *is*
+  updated to **0.7** (from the initial 1.0/disabled default this section
+  originally shipped with): the sweep evidence for it was unambiguous (best
+  primal-gap/efficiency combination of every variant tried, with a modest
+  and acceptable dual-gap cost), so there's no reason to leave a proven
+  win as an opt-in env var -- unlike `passCuts=200` below, which still
+  needs hard-set confirmation before being promoted to a default since it
+  changes global cut-generation round budgets well beyond this filter's
+  scope. `mip-sanity-data`'s small/easy instance mix under-represents the
+  large/many-cut-candidate instances this feature specifically targets, so
+  a hard-set (`~/inst/miplib/2017+spp`) re-check of `MAX_PARALLELISM=0.7`
+  remains worthwhile follow-up, but is not a precondition for shipping a
+  change already validated as a net win on 442 instances.
 
 Reproduce or extend: `Cbc/test/cutfilter-sweep [--configs=cutfilter-configs.tsv]
 [--sec=180] [--jobs=N] [--out=DIR] [--instances=FILE] [--data-dir=PATH]`; see
