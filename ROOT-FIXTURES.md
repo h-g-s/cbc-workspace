@@ -325,3 +325,91 @@ Reproduce or extend: `Cbc/test/fj-tune-sweep.sh --configs=<tsv> --outdir=<dir>
 --fixture-dir=<fixtures> --data-dir=<collection> --nodes=<1|16> --sec=<N>
 --jobs=<N>`, then `Cbc/test/fj-tune-summarize.py <outdir> <configs.tsv>`. See
 `Cbc/test/fj-configs-stage{1,2,3}.tsv` for the exact configs above.
+
+## Cut-pool filtering for Gomory/MIR2/Twomir/Probing (2026-09,
+## mip-sanity-data, 442 instances)
+
+`CglBKClique`'s own clique-cut generator already filters its candidate cuts
+through a `CoinCutPool` (see `Cgl/src/CglBKClique/CglBKClique.cpp`'s
+`insertCuts()`): candidates compete for a best-fitness-per-column slot, and
+the loser is dropped, so a round that would otherwise flood the LP with many
+redundant/dominated cuts only keeps the strongest ones. This experiment
+generalizes that same filter to four other generators known to sometimes
+produce many cuts per round -- Gomory, MixedIntegerRounding2, Twomir, and
+Probing (row cuts only; Probing's column-bound tightening is untouched) --
+via a new `cbcFilterGeneratedCuts()` helper (`Cbc/src/CbcCutPoolFilter.cpp`)
+called once per generator round from `CbcCutGenerator::generateCuts()`.
+
+**Mechanics**: cuts produced by one `generateCuts()` call are fed into a
+fresh `CoinCutPool` (tagging each with its original `OsiCuts` index via a new
+`CoinCut::tag()`/`CoinCutPool::cutTag()` field, so pool compaction can be
+mapped back cleanly); a cut is normalized to the pool's single-sided
+`ax <= rhs` model (negating a `>=`-only cut, skipping genuine ranged/equality
+cuts unfiltered) before being scored. Cuts that lose the best-fitness contest
+are erased from the caller's `OsiCuts` collection; survivors keep their
+original `OsiRowCut` identity/metadata untouched. Gated the same way as
+`CglBKClique`'s own filter -- small models (`numCols < CBC_CUTPOOL_FILTER_MIN_COLS`,
+default 500) and small candidate counts
+(`< CBC_CUTPOOL_FILTER_MIN_CANDIDATES`, default 20) are exempt, since
+filtering only pays for itself with many candidates to choose among. An
+optional parallelism/orthogonality secondary filter
+(`CBC_CUTPOOL_FILTER_MAX_PARALLELISM`, default 1.0/disabled) and an
+always-filter override (`CBC_CUTPOOL_FILTER_ALWAYS=1`, bypasses both gates,
+for A/B testing) round out the env-var surface -- same naming pattern as
+`CglBKClique`'s `CBC_CLIQUE_POOL_*` vars.
+
+**Sweep**: `Cbc/test/cutfilter-sweep` (forked from `cutskip-sweep`, same
+full-CLI-per-(config,instance) approach) against `Cbc/test/cutfilter-configs.tsv`,
+`--sec=180 --jobs=128`, all 442 `mip-sanity-data` instances (3 errors,
+consistent across every config -- pre-existing, unrelated to this change).
+
+| config | mean dual gap closed | mean primal gap closed | mean bbTime(s) | geomean dual eff | geomean primal eff |
+|---|---|---|---|---|---|
+| today (shipped gates: cols>=500, candidates>=20) | 50.45% (base) | 82.24% (base) | 11.42 (base) | 42.30% (base) | 59.56% (base) |
+| `MIN_CANDIDATES=5` (cols gate off) | 49.50% (-0.94pp) | 82.37% (+0.13pp) | 11.08 (-0.33s) | 45.21% (+2.91pp) | 67.00% (+7.44pp) |
+| `MIN_CANDIDATES=20` (cols gate off) | 50.10% (-0.35pp) | 82.38% (+0.15pp) | 11.11 (-0.31s) | 44.72% (+2.43pp) | 64.82% (+5.26pp) |
+| `MIN_CANDIDATES=50` (cols gate off) | 50.31% (-0.14pp) | 81.96% (-0.27pp) | 11.35 (-0.07s) | 43.29% (+0.99pp) | 61.53% (+1.96pp) |
+| `MIN_COLS=100` (candidates gate default) | 50.15% (-0.30pp) | 82.27% (+0.03pp) | 11.22 (-0.20s) | 44.47% (+2.18pp) | 64.03% (+4.46pp) |
+| `ALWAYS=1` (both gates off) | 50.14% (-0.29pp) | 82.68% (+0.44pp) | 11.06 (-0.38s) | 46.17% (+4.93pp) | 67.91% (+9.12pp) |
+| `ALWAYS=1, MAX_PARALLELISM=0.7` | 49.43% (-1.00pp) | 83.03% (+0.80pp) | 10.73 (-0.71s) | 47.51% (+6.27pp) | 70.31% (+11.52pp) |
+| `ALWAYS=1, MAX_PARALLELISM=0.5` | 49.39% (-1.04pp) | 82.01% (-0.23pp) | 10.58 (-0.85s) | 46.92% (+5.68pp) | 68.56% (+9.77pp) |
+| `ALWAYS=1, CLI:-passCuts=200` (reinvest saved time) | 48.69% (-1.74pp) | 82.23% (-0.01pp) | 10.48 (-0.95s) | 57.38% (+16.14pp) | 95.39% (+36.60pp) |
+
+**Findings**:
+- Filtering is a consistent, if modest, net win on this instance set: every
+  variant tested cuts `bbTime` (root+first-16-nodes) while leaving primal
+  gap closed roughly flat-to-better; the dual-gap-closed cost is small
+  (<1pp) except under the most aggressive settings.
+- `mip-sanity-data` is mostly *small* instances (per its own quick-sanity
+  caveat above), so the shipped `MIN_COLS=500` gate suppresses filtering for
+  most of this set -- `ALWAYS=1` (gates off) beats every gated variant on
+  efficiency, confirming the gate is costing real benefit here, though it
+  remains the conservative, `CglBKClique`-consistent choice for production
+  (avoids any risk on tiny models where cuts are cheap regardless, matching
+  the existing "always try everything, it's cheap" rationale for small
+  problems elsewhere in `CbcSolver.cpp`).
+- `MAX_PARALLELISM=0.7` gave the single best primal-gap/efficiency
+  combination of any variant tried, unlike `CglBKClique`'s own 442-instance
+  parallelism sweep (which found no net win for clique cuts specifically) --
+  the four generators here apparently produce more directionally-redundant
+  cuts than clique cuts do, so orthogonality filtering has more to remove.
+- **`CLI:-passCuts=200` (reinvesting the time filtering saves into more root
+  cut-generation rounds) is the standout result**: +16pp dual efficiency,
+  +37pp primal efficiency, with primal gap closed essentially unchanged
+  (-0.01pp) and a still-modest dual-gap cost (-1.74pp) -- confirms the
+  user's "perhaps extend rounds to compensate" hypothesis was directionally
+  correct and is the most promising follow-on to validate on the hard set
+  before considering a shipped-default change to `passCuts`.
+- **Shipped defaults were left unchanged** (`MIN_COLS=500`,
+  `MIN_CANDIDATES=20`, `MAX_PARALLELISM=1.0/disabled`, matching
+  `CglBKClique`'s own precedent) pending a hard-set (`~/inst/miplib/2017+spp`)
+  confirmation -- `mip-sanity-data`'s small/easy instance mix is good for
+  pipeline validation (which it did: no errors introduced, numbers directionally
+  sane) but under-represents the large/many-cut-candidate instances this
+  feature specifically targets, per the same caveat noted for the FJ tuning
+  work above.
+
+Reproduce or extend: `Cbc/test/cutfilter-sweep [--configs=cutfilter-configs.tsv]
+[--sec=180] [--jobs=N] [--out=DIR] [--instances=FILE] [--data-dir=PATH]`; see
+`Cbc/test/cutfilter-configs.tsv` for the exact configs above and
+`Cbc/src/CbcCutPoolFilter.{hpp,cpp}` for the filter implementation.
