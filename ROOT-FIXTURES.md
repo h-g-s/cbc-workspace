@@ -425,3 +425,122 @@ Reproduce or extend: `Cbc/test/cutfilter-sweep [--configs=cutfilter-configs.tsv]
 [--sec=180] [--jobs=N] [--out=DIR] [--instances=FILE] [--data-dir=PATH]`; see
 `Cbc/test/cutfilter-configs.tsv` for the exact configs above and
 `Cbc/src/CbcCutPoolFilter.{hpp,cpp}` for the filter implementation.
+
+## Extending the small-model gate with a "medium problem" `nz`-based
+## secondary threshold (2026-09/10, mip-sanity-data, 442 instances)
+
+Follow-up to the section above: could the `cols<500` small-model exemption
+be safely widened to a "medium problem" zone using a *static, offline*
+feature -- i.e. without ever reading live wall-clock/CPU timing back into a
+running solve to steer behavior, which would make cut selection
+non-reproducible across machines/load (an explicit hard constraint for this
+investigation, not just a style preference)?
+
+**Offline-only instrumentation**: `CbcModel::lastCutRoundResolveTime()`
+(`Cbc/src/CbcModel.{hpp,cpp}`) times every root cut-generation round's
+post-cuts LP `resolve()` call and stores the last value; it is purely
+diagnostic and is never read back by any live decision. Setting
+`CBC_LOG_ROOT_RESOLVE_TIME=1` additionally logs one line per root round
+(`pass=N rows=R cols=C resolveTime=T`) to stderr, used only to build an
+offline dataset.
+
+**Methodology**:
+1. Collected per-round resolve times for all 442 instances
+   (`cbc <inst> -sec 45 -maxNodes 0 -threads 1 -solve` with the env var
+   above), summarized to per-instance max/sum resolve time.
+2. Joined with `Cbc/test/mip-sanity-data/features.tsv` static features and
+   ran 5-fold cross-validated `sklearn` models to find which static feature
+   best predicts "this instance will have an expensive reoptimization
+   round" -- **framed as classification** (is-slow, yes/no above a
+   threshold), not regression (exact time magnitude): the regression
+   framing was noisy and unreliable under cross-validation (R² near
+   zero/negative, worse with deeper trees -- a real overfitting trap, not
+   a usable signal), while the classification framing was stable (AUC
+   0.82-0.94, low variance across folds). This reframing -- predicting
+   the actionable yes/no decision rather than the continuous magnitude --
+   is itself the main methodological takeaway for any future offline
+   feature-based tuning here: check whether the decision you actually need
+   is discrete before fitting a regressor to a noisy continuous target.
+3. `nz` (constraint-matrix nonzero count) emerged as the single best
+   feature (a simple `nz >= ~2000` rule alone reaches AUC ~0.82-0.86 with
+   94-100% recall for genuinely slow instances), beating `cols`/`rows`
+   alone.
+4. Derived a threshold via a "k × reference cost" argument (as suggested
+   mid-investigation): using the currently-exempt `cols<500` group's own
+   observed max-resolve-time distribution as the accepted cost bar
+   (p90=0.034s, worst=0.72s), the largest `numElements` (`nz`) cutoff that
+   stays within that bar is **8000** (p90=0.032s, worst=0.16s at
+   `nz<=8000`) -- i.e. this zone is genuinely as cheap to reoptimize as
+   the group already trusted to skip filtering.
+
+**Implementation**: added `CBC_CUTPOOL_FILTER_MIN_ELEMENTS` (default 0/off)
+to `cbcFilterGeneratedCuts()` (`Cbc/src/CbcCutPoolFilter.{hpp,cpp}`,
+`CbcCutGenerator.cpp` call site passing `solver->getNumElements()`);
+`smallModel` becomes `numCols < minCols || numElements <= minElements`.
+
+**Validation sweep and the noise pitfall**: a first apples-to-apples
+single-seed sweep (`Cbc/test/cutfilter-nz-configs.tsv`: `today` vs.
+`old_cols_only_gate` = `MIN_ELEMENTS=0`, same binary, only this one env var
+varied) came back genuinely mixed on the newly-implied zone
+(`cols>=500, nz<=8000`, n=93): bbTime worse (+0.28s/+12%), dual/primal gap
+closed each up slightly (+0.4pp/+0.8pp), and a per-instance breakdown
+showed 32 instances improved, 22 got worse, 39 unchanged -- a roughly
+symmetric spread, not a directional effect. **This turned out to be almost
+entirely branching tie-break noise**, not real signal: CBC's B&B is
+otherwise deterministic single-threaded, but changing which cuts get kept
+shifts fractional-solution/tie-break landscapes enough to send the search
+down a materially different node sequence even over just 16 nodes.
+
+To separate that noise from a real effect, `cutfilter-sweep` gained a
+`--repeats=N` option: it runs each config `N` times with `-randomSeed`
+1..N and averages nodes/obj/bound/elapsed per instance across the repeats
+before comparing. (This also caught and fixed a real, unrelated bug: the
+sweep's parallel-worker env reset was missing
+`CBC_CUTPOOL_FILTER_MIN_ELEMENTS`, so a stale export from a previous
+worker sharing the same GNU-parallel-dispatched shell could in principle
+leak into the next config's run.) Re-running the same 2-config sweep with
+`--repeats=5` and averaging:
+
+| zone (n) | bbTime delta | dual gap delta | primal gap delta |
+|---|---|---|---|
+| `cols<500` (both same gate; n=253) | +0.003s | +0.00pp | +0.00pp |
+| `cols>=500, nz<=8000` (newly-exempted; n=93) | +0.047s | +0.00pp | +0.00pp |
+| `cols>=500, nz>8000` (filter active both; n=96) | +0.053s | -0.03pp | +0.00pp |
+
+Averaging over 5 independent seeds collapsed the earlier "32 improved / 22
+worse" split entirely: net dual/primal gap-closed delta in the candidate
+zone is **0.00pp**, and the bbTime cost shrinks to a negligible +0.047s
+(from a noisy-looking +0.28s single-seed reading) -- confirming the
+single-run comparison's mixed result was branching noise, not a real
+effect in either direction.
+
+**Conclusion**: no benefit was demonstrated for extending the gate to
+`nz<=8000`, so `CBC_CUTPOOL_FILTER_MIN_ELEMENTS` **ships OFF (0)** --
+harmlessness isn't the question here (a 5-repeat-averaged run shows it's
+essentially free either way), but there's no measured upside to justify
+shipping the added gate/complexity as a new default. The env var and the
+`nz` feature/threshold derivation remain available for future revisiting
+(e.g. against a harder/larger instance set, or if a future generator shows
+a real `nz`-correlated cost). **Reusable takeaways for future
+offline-feature-based experiments on this project**:
+- Frame the ML question as the actual binary decision needed
+  (classification), not the noisy continuous quantity behind it
+  (regression) -- check cross-validated stability before trusting either.
+- Derive thresholds from an existing trusted reference cost
+  (`k × reference`), not an arbitrary round number.
+- Never compare sweep data generated under different shipped defaults
+  (an earlier confounded comparison here, mixing a `MAX_PARALLELISM`
+  default change with this one, produced a false "clean win" signal) --
+  always re-run a fresh apples-to-apples sweep with only the one variable
+  under test changed.
+- When a candidate change's effect is small relative to typical
+  instance-to-instance bbTime variance, **average over multiple
+  `-randomSeed` repeats before trusting a single sweep run's per-instance
+  breakdown** -- a single run's "improved/worsened" split can look like a
+  real, roughly-50/50 effect that's actually pure branching-tie-break
+  noise; `cutfilter-sweep --repeats=N` automates this.
+
+Reproduce: `Cbc/test/cutfilter-sweep --configs=cutfilter-nz-configs.tsv
+--sec=180 --jobs=N --repeats=5 --out=sanity-results/cutfilter-nz-validate-r5`;
+`CBC_LOG_ROOT_RESOLVE_TIME=1` for the diagnostic per-round resolve-time log
+used to derive the `nz<=8000` threshold in the first place.
