@@ -53,6 +53,21 @@ hand-written AVX2 SIMD paths, select which optional dependencies to link
 static/shared/both library types. Run `./config --help` for the full list of
 flags, or just run `./config` with no arguments for the interactive wizard.
 
+> ⚠️ **Every `config` profile builds from the same in-tree build directories**
+> (`Cbc/src/Makefile`, `Clp/src/Makefile`, etc.) — only the final *install*
+> destination is separated by `--prefix`. Running `./config --debug
+> --sanitizer=asan ...` after a `./config --opt --install` therefore
+> **reconfigures those same Makefiles in place**, silently replacing
+> `Cbc/src/cbc` (and the other in-tree binaries) with the debug/sanitizer
+> build until you `./config --opt --install` again. This has bitten a real
+> investigation before: `./test` (which runs the in-tree `Cbc/src/cbc`, not
+> a `--prefix`-installed copy) reported a spurious crash that was actually
+> Clp's `ClpSimplexProgress::looping()` debug-only `abort()` diagnostic
+> firing under a leftover debug build, not a real regression. If you build a
+> debug/sanitizer variant to investigate something, **always
+> `./config --opt --install` again afterward** before trusting `./test`,
+> `./build`, or any of the `Cbc/test/*-sweep` scripts.
+
 ### Wizard screenshots
 
 | Build mode | Sanitiser (debug only) |
