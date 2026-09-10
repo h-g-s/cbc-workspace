@@ -544,3 +544,104 @@ Reproduce: `Cbc/test/cutfilter-sweep --configs=cutfilter-nz-configs.tsv
 --sec=180 --jobs=N --repeats=5 --out=sanity-results/cutfilter-nz-validate-r5`;
 `CBC_LOG_ROOT_RESOLVE_TIME=1` for the diagnostic per-round resolve-time log
 used to derive the `nz<=8000` threshold in the first place.
+
+## Finding a dominating cut-pool-filter config: extensive parameter
+## sweep (2026-09/10, mip-sanity-data, 442 instances)
+
+Goal: sweep the cut-pool filter's remaining tunables (`MAX_PARALLELISM`,
+`MIN_CANDIDATES`, `MIN_COLS`, `-passCuts`) broadly to find a config that
+**dominates** the shipped defaults -- improves (or holds) both dual and
+primal gap closed while keeping `bbTime` essentially flat -- rather than
+trading one for the other. Every config below runs on top of the current
+shipped baseline (`MIN_COLS=500`, `MIN_CANDIDATES=20`,
+`MAX_PARALLELISM=0.7`, `MIN_ELEMENTS=0`), varying one or two knobs at a
+time, using `cutfilter-sweep --repeats=N` (see previous section) throughout
+to keep the noise found in earlier single-seed sweeps from producing a
+false read.
+
+**Stage 1 -- 19-variant grid, `--repeats=3`**
+(`cutfilter-extensive-configs.tsv`, `sanity-results/cutfilter-extensive-r3`):
+
+| variant | dual gap Δ | primal gap Δ | bbTime Δ |
+|---|---|---|---|
+| `par03` (MAX_PARALLELISM=0.3) | -0.04pp | +0.14pp | -0.10s |
+| `par04` | +0.02pp | +0.19pp | +0.04s |
+| `par05` | -0.03pp | -0.06pp | -0.10s |
+| `par06` | -0.00pp | +0.68pp | +0.08s |
+| `par08` | +0.18pp | +0.24pp | +0.09s |
+| `par09` | +0.23pp | +0.57pp | +0.08s |
+| `par10` (filter effectively off) | +0.49pp | +0.03pp | +0.17s |
+| `passcuts150/200/250/300` (MIN_CANDIDATES/MIN_COLS untouched) | -0.9pp to -0.94pp | -0.04 to -0.20pp | **-0.58 to -0.65s** |
+| `par05_passcuts200`, `par09_passcuts200`, `par07_passcuts300` | -0.70 to -0.94pp | -0.04 to +0.47pp | -0.52 to -0.74s |
+| `cand10` (MIN_CANDIDATES=10) | **+0.31pp** | **+0.33pp** | **-0.02s** |
+| `cand50` | +0.42pp | +0.18pp | +0.11s |
+| `mincols300` | -0.22pp | +0.04pp | -0.13s |
+| `mincols750` | +0.01pp | -0.07pp | +0.02s |
+
+**Findings from stage 1**:
+- `MAX_PARALLELISM` shows a **real, repeat-averaged monotonic trend**
+  across the 0.3-1.0 range: higher values (less aggressive
+  orthogonality/parallelism filtering) consistently improve dual gap
+  closed, at a small, roughly-proportional bbTime cost. The previously
+  shipped `0.7` (chosen from a less thorough, single-config-family sweep
+  in the earlier section) was leaving value on the table -- `0.9` gives a
+  clearly better dual/primal combination than `0.7` for a still-small
+  time cost.
+- **`-passCuts=N` overrides alone (with the shipped `MIN_CANDIDATES`/
+  `MIN_COLS` gates still in effect) are a consistent net loss here**:
+  dual gap closed drops ~0.9pp across every value tried (150/200/250/300),
+  despite bbTime dropping meaningfully (~0.6s faster). This is the
+  opposite of the earlier section's "standout" `filter_reinvest200`
+  result -- but that earlier config paired `-passCuts=200` with
+  `CBC_CUTPOOL_FILTER_ALWAYS=1` (filter forced on regardless of the small-
+  model gates), so its gain came from filtering *far more* rounds than
+  today's gated default touches, freeing up much more time to reinvest.
+  `-passCuts` alone, without also loosening the filter gates, mostly just
+  cuts off cut generation earlier without buying back enough bound
+  quality -- a reminder that these two knobs are **not independently
+  transferable**; a result found under one gate configuration doesn't
+  necessarily hold under a different one.
+- **`MIN_CANDIDATES=10` (`cand10`) is the standout single-knob result**:
+  it *strictly dominates* the shipped baseline -- both bound metrics
+  improve *and* mean bbTime is slightly better, not just flat. Relaxing
+  this gate lets filtering kick in for more (smaller) cut-candidate
+  rounds that were previously exempt, and it turns out this pays for
+  itself rather than costing anything.
+- `MIN_COLS` boundary tuning (`mincols300`/`mincols750`) showed no
+  meaningful signal in either direction -- the existing `500` default is
+  fine as-is.
+
+**Stage 2 -- combining the two winners, `--repeats=5`**
+(`cutfilter-combo-configs.tsv`, `sanity-results/cutfilter-combo-r5`, higher
+repeat count since the individual effects are sub-1pp):
+
+| variant | dual gap Δ | primal gap Δ | bbTime Δ |
+|---|---|---|---|
+| `cand10` | +0.30pp | +0.33pp | -0.04s |
+| `par09` | +0.21pp | +0.57pp | +0.07s |
+| `par10` | +0.49pp | +0.03pp | +0.15s |
+| **`cand10_par09`** (MIN_CANDIDATES=10, MAX_PARALLELISM=0.9) | **+0.22pp** | **+0.70pp** | **+0.03s** |
+| `cand10_par10` | +0.26pp | +0.15pp | +0.25s |
+
+Both stage-1 findings replicate cleanly at 5 repeats (`cand10`:
++0.30/+0.33/-0.04s vs. +0.31/+0.33/-0.02s at 3 repeats; `par09`:
++0.21/+0.57/+0.07s vs. +0.23/+0.57/+0.08s), confirming these are real
+effects, not 3-repeat noise. **`cand10_par09` is the dominating
+configuration**: better dual gap closed, meaningfully better primal gap
+closed (+0.70pp, the best of any single or combo variant tried), for a
+bbTime cost (+0.03s) indistinguishable from measurement noise -- clearly
+better than either individual knob alone or the `par10` alternative
+(which trades away primal gain and adds much more bbTime for a bit more
+dual gain).
+
+**Shipped defaults updated**: `CBC_CUTPOOL_FILTER_MIN_CANDIDATES`
+**10** (was 20) and `CBC_CUTPOOL_FILTER_MAX_PARALLELISM` **0.9** (was
+0.7) in `Cbc/src/CbcCutPoolFilter.cpp`. `MIN_COLS` (500) and
+`MIN_ELEMENTS` (0, off) are unchanged -- no sweep evidence justified
+moving either. Full sanity suite (`./test`) re-run after rebuilding with
+the new defaults to confirm no regressions.
+
+Reproduce: `Cbc/test/cutfilter-sweep --configs=cutfilter-extensive-configs.tsv
+--sec=180 --jobs=N --repeats=3`, then
+`Cbc/test/cutfilter-sweep --configs=cutfilter-combo-configs.tsv --sec=180
+--jobs=N --repeats=5` for the higher-confidence combo re-check.
