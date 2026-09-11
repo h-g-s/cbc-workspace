@@ -326,6 +326,28 @@ Reproduce or extend: `Cbc/test/fj-tune-sweep.sh --configs=<tsv> --outdir=<dir>
 --jobs=<N>`, then `Cbc/test/fj-tune-summarize.py <outdir> <configs.tsv>`. See
 `Cbc/test/fj-configs-stage{1,2,3}.tsv` for the exact configs above.
 
+**Follow-up (2026-09-11): seed FJ from FPump's least-fractional pass, not its
+last one.** The FPump->FJ fallback (`feasibilityJumpAfterFPump`) originally
+seeded FJ from whatever rounded candidate FPump's very last major pass
+produced (`CbcHeuristicFPump.cpp`, near the end of `solutionInternal()`).
+That is not necessarily FPump's *best* attempt -- later passes can end up
+more fractional than an earlier one once the cutoff tightens or the
+neighborhood objective bounces around near the end of a retry. Fixed by
+tracking, pass-by-pass, the rounded candidate corresponding to the
+least-fractional LP solution seen across the whole call
+(`bestRoundedAttempt_`, replacing the old `lastRoundedAttempt_`) and handing
+*that* to FJ on failure instead.
+
+Verified on the same hard set (338 root fixtures now available, `--nodes=1
+--sec=20`, real-CLI defaults i.e. `--fj=on --fj-after-fpump=1`): found-rate
+is unchanged (215/338 with both the old last-pass seed and the new
+least-fractional seed -- built and A/B'd both binaries directly, not just
+via the sweep script), and of the 2 instances where the seed choice actually
+changed FJ's result, **both improved**: `neos-5052403-cygnet` 193 -> 187
+(bks 182), `stdc6262p` -1348612.5 -> -1358902.5 (bks -1390607.5). No
+regressions. Confirms the least-fractional seed is a strict (if narrow, on
+this sample) improvement over the last-pass seed at no found-rate cost.
+
 ## Cut-pool filtering for Gomory/MIR2/Twomir/Probing (2026-09,
 ## mip-sanity-data, 442 instances)
 
