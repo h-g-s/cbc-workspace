@@ -348,6 +348,74 @@ changed FJ's result, **both improved**: `neos-5052403-cygnet` 193 -> 187
 regressions. Confirms the least-fractional seed is a strict (if narrow, on
 this sample) improvement over the last-pass seed at no found-rate cost.
 
+**Follow-up (2026-09-12): FJ was still running *before* FPump, contradicting
+the fallback design's intent.** A real CLI run on `etDecsi.mps.gz` showed FJ
+finding an incumbent while FPump appeared to not run at all. Investigation
+(`CbcSolverHeuristics.cpp`'s registration order, `CbcModel.cpp`'s heuristic
+loop) confirmed this was by design, not a bug: FJ is registered *before*
+FPump ("LP-free and fast, cheapest way to get some incumbent early"), and
+heuristics execute in registration order, so FJ's standalone attempt always
+gets first crack at the root, before FPump's failure-fallback path is even
+reachable. FPump *did* still run afterwards and failed near-instantly on
+this small preprocessed instance, but its failure is never printed in the
+"Root node heuristics" table (`CbcModel.cpp` special-cases FPump to log only
+on success via `noteFPSolution()`) -- confirmed via `-log 3` showing
+`Heuristic feasibility pump: 0.000s (no good)`. Net effect: the "FJ only
+runs if FPump fails" behavior the fallback wiring was meant to provide could
+in practice only trigger when FJ's own standalone attempt *also* failed --
+not the intended "give FPump first crack, use FJ only as a rescue" ordering.
+
+**Fix**: `feasibilityJumpAfterFPump` extended from a boolean-ish 0/1 to
+0/1/2. New value `2` ("fallback-only"): FJ is still constructed and wired
+into FPump's failure-fallback path exactly as before, but is *not* given a
+standalone turn on its own schedule at all -- so FPump always gets to run
+first. Implementation note: this needed an extra fix inside
+`CbcHeuristicFeasibilityJump::solution()` itself, because the base
+`CbcHeuristic::shouldHeurRun()` does *not* consult `when()` (only the
+`whereFrom_` bitmask and hotstart/no-rows checks) -- so merely calling
+`setWhen(0)` on the registered clone was silently a no-op for blocking its
+normal per-round schedule; `solution()` now checks `when()==0` explicitly at
+its top (mirroring how `CbcHeuristicFPump::solutionInternal()` already
+gates itself), while `solveFromSeed()` (the direct fallback entry point
+FPump calls) continues to bypass this and `shouldHeurRun()` entirely, by
+design.
+
+**A/B result on all 338 root fixtures** (`--nodes=1 --sec=20`,
+`Cbc/test/fj-tune-sweep.sh`, config `--fj-after-fpump=1` i.e. old FJ-first
+ordering vs. `--fj-after-fpump=2` i.e. new FPump-first/FJ-fallback-only):
+
+| config | found | found % | avg gap (found, w/ bks) |
+|---|---|---|---|
+| `--fj-after-fpump=1` (old default, FJ-first) | 214/338 | 63.31% | 21.75pp (n=50) |
+| `--fj-after-fpump=2` (new, FPump-first) | 220/338 | 65.09% | 26.30pp (n=52) |
+
+Net +6 instances found (12 newly found by the fallback-only ordering, 6 lost
+that the FJ-first ordering used to find). Among the 208 instances both
+configs found *and* which have a `bks.tsv` entry, per-instance objective
+distance to BKS is more often worse under the new ordering (55 instances
+farther from BKS, 30 closer, 122 tied) -- so this is a genuine trade-off:
+**more instances get *some* incumbent, but the incumbent is on average not
+as tight**. This matches the original recollection driving this whole
+investigation ("we could obtain better results with FJ by executing it only
+if FPump failed") -- found-rate at the root, not incumbent quality, is the
+relevant metric here, since a root-node incumbent this early is mostly
+useful as *any* starting bound/warm start for the tree, not as a final
+answer.
+
+**Shipped default changed**: `feasibilityJumpAfterFPump` default flipped
+from `1` to `2` in `CbcParameters.cpp`. Value `1` (old FJ-first-then-
+fallback-if-both-fail) remains available for anyone who wants FJ's cheap,
+eager standalone attempt regardless of FPump's outcome. Full
+`mip-sanity-data` regression suite (`./test`) re-run after rebuilding with
+the new default to confirm no regressions; the `bpc_*`/`10teams`/`noswot`/
+`pk1` targeted subset plus all supplementary C-API/LP-relaxation/lazy-
+constraint/MIP-start/coefficient-tightening/row-activity test suites also
+re-run and pass.
+
+Reproduce: `Cbc/test/fj-tune-sweep.sh --configs=<tsv with
+--fj-after-fpump=1/--fj-after-fpump=2 rows> --outdir=<dir>
+--fixture-dir=/home/haroldo/inst/miplib/2017+spp/rootFixtures`.
+
 ## Cut-pool filtering for Gomory/MIR2/Twomir/Probing (2026-09,
 ## mip-sanity-data, 442 instances)
 
