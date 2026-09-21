@@ -31,6 +31,7 @@ Written by `CbcRootFixtureDump.hpp`, one set per instance, tag `root`:
 | `<name>.root.sol`    | optimal root LP solution (cross-check) |
 | `<name>.root.ctype`  | integer/continuous per column (MPS cannot express a fixed integer column -- see the file's header comment) |
 | `<name>.root.meta`   | rows/cols/elements/objValue/objSense/lpOptimal/paddedColumns/integerColumns |
+| `<name>.root.debugsol` | **only written when the dumping run was started with `-debugCuts <file>`**: the reference/known solution's values, one `<col-index> <value>` line per column, in the same preprocessed column order as the `.mps.gz`, captured straight from `OsiRowCutDebugger::optimalSolution()`. Absent (not an error) on an ordinary dumping run. See "Debugging invalid cuts..." in `AGENTS.md` for the workflow this enables: `mip-root-replay` auto-loads it and re-attaches the debugger to the replayed solver, so an invalid-cut bug (false infeasibility / a cut that cuts off the true optimum) reproduces offline in a fraction of the original wall time instead of requiring a full solve. |
 
 This is deliberately the same shape as the per-generator fixtures
 (`CbcClqFixtureDump.hpp` and friends) minus any generator-specific payload --

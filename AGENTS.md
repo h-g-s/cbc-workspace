@@ -633,6 +633,100 @@ generator-agnostic apart from its payload, and the existing 357 preprocessed
 instances plus 237 clique fixtures under `~/instances/miplib/2017+spp/` are
 reusable as-is.
 
+## Debugging invalid cuts, false infeasibility, and missing optimal solutions
+
+A distinct class of bug from ordinary crashes: a cut generator emits a row cut
+that is mathematically wrong (cuts off a real, better-or-equal-feasible
+solution) rather than merely a weak one. Symptoms range from Cbc reporting
+`INFEASIBLE` on a known-feasible instance, to silently returning a suboptimal
+"optimal" solution, to eventually hitting an internal `debugger->invalidCut()`
+assertion. These bugs are almost always in a specific cut generator's
+coefficient/rhs derivation (a sign error, an off-by-one in a tableau-row
+substitution, a bound-selection mistake for a particular column-type
+combination), not in `CbcModel`'s bookkeeping — so the goal of debugging is
+always to isolate the exact cut, the exact call, and the exact
+row/column indices involved, then re-derive the arithmetic by hand.
+
+**`-debugCuts <reference.sol>` is the primary tool.** Passed on the `cbc`
+command line alongside a known feasible/optimal solution file (same format as
+`-mipstart`), it loads the reference solution, matches it to the model by
+column NAME (so it survives preprocessing's renumbering — see
+`CbcParam::DEBUGCUTS` in `CbcSolver.cpp`), and attaches an `OsiRowCutDebugger`
+to the solver. From that point on, every `debugger->invalidCut()` check
+already wired throughout `CbcModel.cpp`/`CbcCutGenerator.cpp`/`CbcNode.cpp`/
+etc. (search either file for `invalidCut`) fires against this reference
+solution, and CBC aborts (via `CoinAssert`) at the exact point an invalid cut
+is generated — with the model state (row/column indices, coefficients)
+inspectable at that point via a debugger or ad-hoc `printf`/`fprintf(stderr,
+...)` instrumentation added temporarily to the offending generator.
+
+**The reproduction is usually the expensive part, not the fix.** A hard
+instance can take many minutes to hours of wall time to reach the specific
+node/pass where the invalid cut fires, which makes iterating on a candidate
+fix (edit → rebuild → rerun → wait → inspect) prohibitively slow if done
+against the full `cbc` command line every time. **Use the root-fixture
+infrastructure (`ROOT-FIXTURES.md`) to make this instant instead** —
+**but only once pre-processing itself has been ruled out as the source.**
+A root fixture captures the state *after* `CglPreProcess` has already run
+(bound tightening, row reduction, clique/coefficient strengthening, ...), and
+`mip-root-replay` never re-executes any of it — so if the bug could plausibly
+be a bad transformation *inside* pre-processing (rather than in a cut
+generator called afterwards), a fixture-based replay is structurally blind to
+it: it starts from a state already downstream of the suspect code. Confirm
+first (e.g. by re-running the real `cbc -debugCuts` command line with
+`-preprocess off` to see whether the invalid-cut/false-infeasibility symptom
+survives without pre-processing, or by instrumenting `CglPreProcess` directly
+against the reference solution) that the bug reproduces with pre-processing's
+output otherwise intact, before reaching for the fixture/replay shortcut.
+Once that is established:
+
+1. Build a `-DCBC_DUMP_ROOT_FIXTURE`-enabled `cbc` (see `ROOT-FIXTURES.md`/
+   `gen-root-fixtures` for the exact build incantation — do not leave this
+   flag on the normal workspace binary).
+2. Run it ONCE on the failing instance with `-debugCuts <reference.sol>
+   -maxNodes 1 -solve -quit` (add `-lpMethod=racing -threads=N` and a
+   generous `-sec` if the root LP itself is slow/ill-conditioned — see
+   `gen-root-fixtures --pass2`'s defaults for numerically hard instances).
+   This writes the usual root-fixture set (`.mps.gz`/`.bas`/`.sol`/`.ctype`/
+   `.meta`) **plus a `.debugsol` sidecar** — the reference solution's values
+   in the exact preprocessed column order the fixture uses, captured directly
+   from `OsiRowCutDebugger::optimalSolution()` via
+   `cbcRootFixtureWriteDebugSol()` in `CbcRootFixtureDump.hpp`. This sidecar
+   is written automatically whenever `-debugCuts` was active on the dumping
+   run; it is silently skipped (not an error) otherwise.
+3. Rebuild the normal (non-dump) `cbc` immediately after, so the workspace
+   binary is never left with dump code enabled.
+4. Replay with `Cbc/test/mip-root-replay <instance> --nodes=<N> --no-heur
+   --log=2`. `mip-root-replay` auto-detects the `.debugsol` sidecar and
+   calls `si.activateRowCutDebugger(values)` on the loaded fixture's solver
+   *before* building the `CbcModel` around it (the debugger is carried
+   through via `OsiSolverInterface`'s copy constructor) — so every
+   `invalidCut()` check already in `CbcModel`/`CbcCutGenerator`/`CbcNode`
+   fires exactly as it would on the real solve, at whatever pass/node the
+   bug is at, in a fraction of the original wall time (no re-preprocessing,
+   no re-solving the root LP, heuristics skippable with `--no-heur`).
+   Increase `--nodes` and re-run if the bug is deeper in the tree than the
+   first replay reaches; the fixture only needs to be dumped once per
+   instance and is reused for every subsequent replay/candidate fix.
+5. Once the invalid cut reproduces, add temporary, targeted `fprintf(stderr,
+   ...)` instrumentation inside the suspect generator (guarded by a
+   locally-scoped macro, never committed) to print the exact row/column
+   indices and coefficients at the point of construction, and re-derive the
+   arithmetic by hand against the reference solution's values for those same
+   columns — this is what actually finds the bug; the fixture/replay
+   machinery only makes each iteration of that loop cheap.
+
+**Mandatory before considering any candidate fix correct: full-suite
+regression testing, not just the reproduction case.** A fix that resolves the
+one observed invalid cut can still be mathematically wrong and silently break
+many other cuts elsewhere (this happened once already — a fix that appeared
+correct for the reproduction case caused 30 regressions across
+`mip-sanity-data` when tested properly). Always: build a true "before"
+baseline (revert the fix, rebuild, run the full `./test` suite), apply the
+fix, rebuild, run the full suite again, and compare — never trust a fix based
+on the single reproduction case or a subset of instances alone. See
+`./compare-results` for automating this comparison.
+
 ## Related Work
 
 This workspace complements — but is independent from — `h-g-s/mipster`, a separate
