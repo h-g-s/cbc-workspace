@@ -266,6 +266,88 @@ prototyping for real on a meaningful fraction of instances -- still not
 wired into production code; see the `--probe-report` section below for the
 measurement methodology and its caveats.
 
+## Primal-gap impact and VND parameter tuning (same 223-instance set)
+
+The results above measure *relative* improvement over each fixture's own
+incumbent. A deeper question is how much the population's **primal gap vs.
+best-known solution (BKS)** actually closes -- this uses `bks.tsv`
+(222/223 fixtures have a BKS entry) and
+`gap(obj) = |obj - bks| / max(|bks|, 1e-10) * 100`, with `gapAfter` falling
+back to `gapBefore` when no improving solution is found (one-shot-per-point
+process isolation throughout, per the known `--sweep` bug above).
+
+**RINS, primal gap vs. node budget** (`shallow=0, fixClose=0`, population =
+all 222 instances with a BKS; population median `gapBefore` = **46.4%**,
+fixed regardless of node budget since it only depends on each fixture's own
+incumbent):
+
+| nodes | improved / 222 | population median `gapAfter` | median gap reduction (improved only) | avg time |
+|---|---|---|---|---|
+| 50 | 71 (32.0%) | 28.1% | 33.0 pp | 355ms |
+| 200 | 85 (38.3%) | 24.5% | 38.5 pp | 579ms |
+| 1000 | 85 (38.3%) | 23.0% | 45.8 pp | 742ms |
+
+Confirms and sharpens the earlier "extra nodes mainly improve quality, not
+hit-rate" finding: `200 -> 1000` nodes buys **zero** extra successes (85
+either way) but keeps closing the gap on the *already-found* instances
+(38.5 -> 45.8pp median reduction, population median gap 24.5% -> 23.0%) for
+~28% more time. Only 1-2 of the 71-85 successes per budget fully close the
+gap to <0.01% (i.e. match/prove BKS) -- RINS here almost always finds *an*
+improving solution, essentially never *the* optimal one, which is expected
+of a single quick root-node heuristic call.
+
+**VND parameter tuning** (`nodes x fracSmall`, the only two knobs that
+affect VND's direct-call outcome -- `shallow`/`fixClose`/`howOften` are
+confirmed no-ops for this call pattern, see below):
+
+| nodes | fracSmall | found / 222 | median `gapAfter` (pop) | median reduction (improved) | avg time |
+|---|---|---|---|---|---|
+| 50 | 0.1 | 43 (19.4%) | 34.3% | 37.4pp | 221ms |
+| 50 | 0.5 (old default) | 61 (27.5%) | 30.1% | 33.3pp | 339ms |
+| 50 | 1.0 | 73 (32.9%) | 26.8% | 26.4pp | 607ms |
+| 200 | 0.1 | 50 (22.5%) | 32.3% | 46.9pp | 315ms |
+| 200 | 0.5 (old default) | 72 (32.4%) | 28.1% | 40.7pp | 559ms |
+| **200** | **1.0** | **86 (38.7%)** | **26.1%** | 33.3pp | 965ms |
+| 1000 | 0.1 | 51 (23.0%) | 30.8% | 52.6pp | 351ms |
+| 1000 | 0.5 (old default) | 72 (32.4%) | 26.7% | 49.2pp | 688ms |
+| 1000 | 1.0 | 87 (39.2%) | 23.5% | 38.5pp | 1204ms |
+
+`fracSmall=1.0` (i.e. no restriction on which columns count as "small"/
+eligible to fix) **strictly dominates every other fracSmall value at every
+node budget tested** -- higher found-rate *and* lower population median
+gap, for every `(0.1, 0.3, 0.5, 0.7)` it was compared against (0.3/0.7 rows
+omitted above for brevity, monotonic in between). The previous section's
+"VND is not a good replacement for RINS" conclusion used the untuned
+default `fracSmall=0.5` -- **with `fracSmall=1.0` it must be revised**, see
+below.
+
+**Revised RINS vs. VND head-to-head, both at their good settings**
+(RINS: `shallow=0, fixClose=0`; VND: `fracSmall=1.0`):
+
+| nodes | RINS found | VND found | both | RINS-only | VND-only | union found-rate | median gapAfter (best-of-two) |
+|---|---|---|---|---|---|---|---|
+| 200 | 85 | 86 | 72 | 13 | 14 | 99/222 (44.6%) | 23.3% |
+| 1000 | 85 | 87 | 72 | 13 | 15 | 100/222 (45.0%) | 21.3% |
+
+Tuned VND is no longer strictly dominated by RINS: found-rates are now
+essentially tied (85 vs 86-87/222), and the two heuristics succeed on
+**largely different instances** (only 72/~99-100 overlap) -- VND-only
+successes (14-15 instances) are comparable in count to RINS-only successes
+(13 instances). **Running both is meaningfully better than either alone**:
+union found-rate jumps to 44.6-45.0% (vs 38.1-39.2% each), and the
+best-of-two population median gap drops further (23.3%/21.3% vs 24.5%/23.0%
+for RINS alone). The combined average time cost is modest for an early-node
+budget: ~1.5s (nodes=200) or ~1.9s (nodes=1000) per instance for
+RINS+tuned-VND together, vs. RINS alone at 0.58-0.74s.
+
+**Recommendation**: at the root/early nodes, run RINS (`shallow=0,
+fixClose=0`, `nodes=200`) *and* VND (`fracSmall=1.0`, `nodes=200`) as
+complementary heuristics rather than choosing one -- they catch different
+instances. If only one budget increase is affordable, prefer bumping VND's
+`fracSmall` to 1.0 over increasing either heuristic's node budget past 200:
+it buys more additional found-instances per unit time than the 200->1000
+node jump does for either heuristic alone.
+
 ## Replaying / sweeping -- `test/rins-bench`
 
 ```sh
