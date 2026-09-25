@@ -642,3 +642,58 @@ improvement, consistent with the earlier decision to enable VND by default
 under the same reasoning. Per-instance result tables are saved as
 `baseline.tsv`/`candidate.tsv` for anyone wanting to re-run
 `./compare-results` themselves.
+
+### Exploring an "auto" per-instance schedule (negative result, for now)
+
+Natural follow-up question: since scheduling helps some instances and hurts
+others, can a per-instance choice (picked from `OsiFeatures` -- the 229
+numeric MIP features already extracted via `CbcInstanceFeatures`/
+`-writeFeatures`, built for exactly this kind of algorithm-selection
+problem) beat a single flat default? Tested this at increasing scale and
+rigor, and it does **not** hold up:
+
+1. **55-instance sweep, 9 configs** (the study used to pick `K=100`):
+   instance size (`rows`/`nz`) correlated moderately (r≈0.35-0.44) with
+   whether frequent scheduling helped -- directionally consistent with
+   "small/cheap-per-node instances lose, big/expensive-per-node instances
+   gain", but n=55 is too small to trust.
+2. **Full 500-instance mip-sanity-data validation** (reusing the
+   Legacy-vs-K100 comparison above, no extra compute): only 16 regressions
+   existed to learn from. A depth-3 decision tree gating on `OsiFeatures`
+   caught all 16 but flagged 26 of the 62 real improvements as "risky" too
+   (12% precision) -- classic small-positive-class overfitting. Regression
+   magnitude (median 2.2pp) was also smaller than improvement magnitude
+   (median 3.3pp), so a gate built from this sample would sacrifice more
+   value than it protects.
+3. **Dedicated larger sweep to settle it**: 389 non-trivial instances
+   (`nodes>0` under the K=100 default) x 7 configs (`legacy`,
+   `nodes-no-improve` at `K∈{10,25,50,100,200,400}`), applied identically
+   to RINS+VND via `mip-root-replay` (4096 nodes / 900s cap each,
+   2723 jobs total). Two things fell out of this:
+   - Picking the exact best-`K` per instance (7-way classification) is
+     **not learnable at all**: 5-fold CV accuracy for a depth-4 tree
+     (15.8%) and a random forest (15.6%) were both *below* the
+     majority-class baseline (20.3%). The per-run cost signal is too
+     noisy (single run, no repetition/averaging) at this granularity.
+   - Collapsing to the actually-useful binary question -- "does `K=100`
+     beat `Legacy` on this instance?" -- reproduces the earlier finding at
+     10x the sample size (87 `k100_better` vs. 18 `legacy_better` vs. 274
+     ties, i.e. `K=100` wins the large majority of non-tied cases) but
+     **no `OsiFeatures`-based model beats the naive "always pick K=100"
+     baseline**: a random forest's 5-fold CV accuracy (82.9%) exactly
+     matched the majority-class baseline, and a decision tree did *worse*
+     (75.2%).
+
+**Conclusion: an auto/learned per-instance schedule selector is not
+currently justified.** The flat `EveryKNodesNoImprove(K=100)` default
+already shipped is, as far as this data can tell, at least as good as any
+feature-based selector we could build from it -- the earlier
+size/density correlation seen at small sample sizes does not survive
+cross-validation at scale. Revisiting this would need either (a) many more
+regression examples than exist at K=100's current ~4% instance-level
+regression rate (i.e. a much larger and more diverse instance corpus), or
+(b) less noisy per-instance labels (repeated runs with different seeds,
+averaged, rather than one run per instance/config) -- both a materially
+larger undertaking than this exploration. Raw sweep data
+(`results.tsv`/`labeled_dataset.csv`/`binary_k100_vs_legacy.csv`) is kept
+for anyone wanting to revisit this with more data later.
