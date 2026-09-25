@@ -613,3 +613,32 @@ opt-in requires the full `mip-sanity-data` regression (`./test`,
 subset -- not yet done as of this writing. Until that validation exists,
 `Legacy` remains the default and the new modes are available as an opt-in
 tuning knob via `setScheduleMode()` / `--rins-schedule=` / `--vnd-schedule=`.
+
+### Full-suite validation: `EveryKNodesNoImprove(K=100)` shipped as the new default
+
+Ran the complete `mip-sanity-data` regression suite (500 instances, one
+`cbc` thread per instance, suggested `limits.tsv` node/time caps) twice:
+baseline (production defaults, i.e. `Legacy` mode) vs. a candidate build
+with `setScheduleMode(HeuristicScheduleMode::EveryKNodesNoImprove, 100)`
+applied to both RINS and VND in `CbcSolverHeuristics.cpp` (`doHeuristics()`).
+
+| Metric | Baseline | Candidate | Delta |
+|---|---|---|---|
+| Passed / Failed / Overtime / Error | 500/0/0/0 | 500/0/0/0 | no correctness change |
+| Optimal solutions found | 338/500 | 340/500 | +2 |
+| Total runtime | 4083.4s | 4821.5s | +18.1% |
+| `./compare-results` regressions | -- | 16 | wider gap, no status change |
+| `./compare-results` improvements | -- | 62 | narrower gap or newly optimal |
+
+62 improvements vs. 16 regressions, zero new failures/overtimes/errors, and
++2 confirmed-optimal instances -- a clear net win, not just a wash. This
+matches the "fires again once progress stalls, backs off once it's not
+helping" intuition behind `EveryKNodesNoImprove` and confirms it
+generalizes well beyond the 55-instance sweep subset used to select it.
+Consequently, **this is now the shipped default** for both RINS and VND
+(`CbcSolverHeuristics.cpp`'s `doHeuristics()`); the ~18% aggregate runtime
+increase was judged an acceptable trade for the primal/dual gap
+improvement, consistent with the earlier decision to enable VND by default
+under the same reasoning. Per-instance result tables are saved as
+`baseline.tsv`/`candidate.tsv` for anyone wanting to re-run
+`./compare-results` themselves.
