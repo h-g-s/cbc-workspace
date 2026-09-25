@@ -496,3 +496,120 @@ saves.
 4. Confirm any change that looks promising with the full `mip-sanity-data`
    suite (`./test`, `./compare-results`) before trusting it -- a fixture-level
    win on a handful of instances is a hypothesis, not a result.
+
+## Per-node scheduling API (`HeuristicScheduleMode`) and a real production bug it uncovered
+
+Everything above measures RINS/VND at a single call site (a root or root-like
+fixture). A separate question -- raised explicitly -- is *how often should
+RINS/VND re-run once real per-node tree search is underway*, since re-running
+too rarely wastes an improving-heuristic opportunity and too often burns time
+that could have gone to plain B&B exploration. `CbcHeuristic` gained an
+opt-in, explicit scheduling API instead of the historical private
+`howOften_`/`decayFactor_`/`shallowDepth_`/`howOftenShallow_` magic-number
+math (still the default -- see "Legacy" below):
+
+```cpp
+enum class HeuristicScheduleMode {
+  Legacy = 0,               // byte-identical to historical howOften_ math
+  EveryKDepth = 1,          // fire when depth % K == 0
+  EveryKNodes = 2,          // fire when nodeCount - lastRun >= K
+  EveryKNodesNoImprove = 3, // fire immediately on any new incumbent,
+                            // otherwise when nodeCount - lastRun >= K
+};
+heuristic->setScheduleMode(HeuristicScheduleMode::EveryKNodes, /*K=*/25);
+```
+
+`mip-root-replay` exposes this directly: `--rins-schedule=legacy|depth|nodes|
+nodes-no-improve` / `--rins-schedule-k=N` and the `--vnd-schedule*` equivalents.
+
+### The bug: `shouldHeurRun()`'s "deep" gate is permanently stuck at 0
+
+Investigating why an initial 495-job sweep across all 4 non-Legacy modes
+showed **exactly zero measurable effect** (identical pooled means, zero
+per-instance wins/losses vs Legacy for every config) led to a real,
+pre-existing, production-impacting defect in
+`CbcHeuristic::shouldHeurRun()`, independent of anything added here:
+
+- The "deep" branch (`depth > shallowDepth_`, i.e. essentially all of the
+  tree beyond the first couple of levels) only increments
+  `numInvocationsInDeep_` `if (model_->getCurrentPassNumber() == 1)`.
+- But the main per-node tree-search call site in `CbcModel.cpp`
+  (`whereFrom=3`, the loop that runs heuristics once per explored node)
+  explicitly sets `currentPassNumber_ = 0;` immediately before calling
+  heuristics. Pass number is therefore *never* 1 at that call site.
+- `numInvocationsInDeep_` is consequently stuck at 0 forever, so
+  `numInvocationsInDeep_ - lastRunDeep_ < howOften_` (base class default
+  `howOften_ = 1`) is always true, and `shouldHeurRun()` always returns
+  `false` -- for the entire remainder of the tree search, for any heuristic
+  that doesn't override `shouldHeurRun()` itself.
+- Confirmed with the real installed `cbc` CLI binary directly (not just
+  `mip-root-replay`): RINS accepted only twice at node 0 on `jssp_la11
+  -maxNodes 500`, then rejected every subsequent call with
+  `numInvocationsInDeep_==0` forever. This is a genuine defect in mainline
+  `CbcHeuristic`, not an artifact of this fixture harness.
+
+**Fix, kept strictly backward compatible:** `CbcHeuristicRINS`/
+`CbcHeuristicVND` now override `shouldHeurRun()`. In `Legacy` mode the
+override calls the unmodified base-class implementation -- bug included, so
+existing tuned behaviour/tests are untouched byte-for-byte. Only when a
+non-Legacy schedule mode is explicitly requested does the override bypass
+the broken deep-branch counter (re-implementing only the still-correct
+`whereFrom_` bitmask and hotstart/no-rows checks) and defer all periodic
+gating to `shouldRunBySchedule()` inside `solution()` instead. The base
+`CbcHeuristic::shouldHeurRun()` itself was **not** changed, so every other
+heuristic in the codebase is unaffected and keeps its historical (buggy)
+behaviour -- this is flagged here as a candidate for a proper, separately
+reviewed upstream fix, since it likely affects other heuristics
+(e.g. local search / diving heuristics that also rely on the base gating)
+the same way.
+
+### Re-run after the fix: real, mixed, instance-dependent signal
+
+Re-running the same 55-instance/9-config, 4096-node/1800s-cap sweep after
+the fix showed the expected genuine differentiation (paired per-instance
+deltas vs `rins_legacy`, `n=55` each):
+
+| config | bound wins/losses | primal wins/losses | mean Δtime (s) |
+|---|---|---|---|
+| `rins_nodes_k25` | 4 / 1 | 7 / 1 | +9.0 |
+| `rins_nodes_k100` | 0 / 0 | 5 / 2 | +1.5 |
+| `rins_noimp_k25` | 3 / 0 | 8 / 2 | +9.0 |
+| `rins_noimp_k100` | 2 / 1 | 8 / 3 | +4.4 |
+| `vnd_nodes_k25` | 2 / 1 | 8 / 2 | +14.8 |
+| `vnd_nodes_k100` | 1 / 0 | 7 / 3 | -1.1 |
+| `vnd_noimp_k25` | 1 / 1 | 8 / 3 | +15.2 |
+| `vnd_noimp_k100` | 1 / 2 | 5 / 5 | +4.1 |
+
+Two instances illustrate the trade-off the user anticipated up front:
+
+- `thor50dday` (large, hard): Legacy's node-count math essentially stops
+  calling RINS/VND after the opening nodes and finishes 4096 nodes with
+  `best=101647` (88.6% gap vs bks). Every non-Legacy config keeps re-running
+  RINS/VND periodically and finishes the same 4096 nodes with
+  `best≈42000-44000` (72-74% gap) -- a large, genuine primal-gap
+  improvement from simply not letting the heuristic go permanently silent.
+- `jssp_la11` (small, cheap per node): every non-Legacy config gets a
+  **worse** incumbent (`best=1372-1518` vs Legacy's `1282`) despite reaching
+  the same node count, because re-running RINS/VND every 25-100 nodes here
+  costs real wall time (7-10x slower to reach 4096 nodes) that would
+  otherwise have gone into exploring more of the tree.
+- `markshare1`'s huge `d_primal` values (50-74) in the raw per-instance
+  table are a gap-normalization artifact (`bks=1`, tiny denominator) and
+  should be excluded from any aggregate/eyeball comparison, not treated as
+  a real signal -- carried over from the same outlier lesson noted earlier
+  for the fixture-level sweeps.
+
+**Conclusion / recommendation:** the scheduling API works and is a real
+lever, but there is no single K that is a free win across this instance mix
+-- more frequent re-runs help exactly the instances where the heuristic
+would otherwise go silent (large/hard, few nodes explored) and hurt exactly
+the instances where node throughput itself is the bottleneck (small/cheap
+per node, thousands of nodes explored). `EveryKNodesNoImprove` is the most
+defensible non-Legacy default candidate (it naturally throttles back once
+progress stalls rather than re-running on a fixed cadence regardless of
+whether it is helping), but shipping it as the *default* instead of an
+opt-in requires the full `mip-sanity-data` regression (`./test`,
+`./compare-results`) across all instances, not just this 55-instance
+subset -- not yet done as of this writing. Until that validation exists,
+`Legacy` remains the default and the new modes are available as an opt-in
+tuning knob via `setScheduleMode()` / `--rins-schedule=` / `--vnd-schedule=`.
