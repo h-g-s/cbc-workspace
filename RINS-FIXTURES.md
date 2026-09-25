@@ -348,6 +348,45 @@ instances. If only one budget increase is affordable, prefer bumping VND's
 it buys more additional found-instances per unit time than the 200->1000
 node jump does for either heuristic alone.
 
+**RINS's own `fractionSmall` was also never tuned in the earlier sweep**
+(only `shallow x fixClose x nodes` was) -- it turns out to follow the exact
+same pattern as VND's:
+
+| fracSmall | found / 222 | population median `gapAfter` | median reduction (improved) | avg time |
+|---|---|---|---|---|
+| 0.3 | 75 (33.8%) | 27.0% | 42.9pp | 428ms |
+| 0.5 (old default) | 85 (38.3%) | 24.5% | 38.5pp | 576ms |
+| 0.7 | 90 (40.5%) | 23.7% | 33.2pp | 688ms |
+| **1.0** | **99 (44.6%)** | **23.1%** | 28.6pp | 987ms |
+
+`fracSmall=1.0` strictly dominates 0.3/0.5/0.7 for RINS too, monotonically,
+at `nodes=200`. This closes the "what else is left to tune" question for
+both heuristics' direct-call parameters -- the two-knob picture is now
+complete: `nodes` (found-rate mostly saturates by 200, quality keeps
+improving to 1000) and `fracSmall` (1.0 dominates everywhere tested for
+both RINS and VND). Two axes remain *not* measurable with this one-shot
+fixture harness, since it bypasses `CbcModel`'s real per-node scheduling
+entirely: `decayFactor_`/`howOften_` (how often the heuristic re-fires
+across a real multi-thousand-node tree after repeated failures) and
+`shallowDepth_`/`howOftenShallow_` (real-tree depth-based throttling) --
+tuning those needs actual multi-node B&C runs (e.g. `mip-root-replay`
+extended past 1 node, or the full `mip-sanity-data` suite), not this
+harness's single direct call.
+
+**Shipped as the new production defaults** (`Cbc@next` commit
+`b563f595`): `VND` is now `on` by default alongside `RINS` (was `off`);
+both `RINS.fractionSmall_` and `VND.fractionSmall_` are now `1.0` (were
+0.5/0.6 and 0.4 respectively); `VND.numberNodes_` is now `200` (was `50`,
+the only value reachable via VND's `on`/`both`/`before` keywords -- it has
+no `200`/`1000`/`10000` keyword like RENS does). Validated against the
+full 500-check `mip-sanity-data` + unit-test suite before/after: 0 new
+failures/overtimes/errors (500/500 pass both ways), median primal gap
+flat-to-slightly-better (5.10% -> 5.00%), with per-instance gap movement in
+both directions (21 improvements vs 15 threshold-significant regressions
+per `compare-results`) from the changed search order that an additional
+always-on heuristic introduces -- expected noise, not a correctness
+regression.
+
 ## Replaying / sweeping -- `test/rins-bench`
 
 ```sh
