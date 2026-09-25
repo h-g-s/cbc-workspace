@@ -155,7 +155,116 @@ alone exceeds a 600s (pass-1) budget; `ROOT-FIXTURES.md` documents that most
 (not all) of these can eventually be recovered with a much more generous
 `--pass2` (3h+ LP racing) budget, not attempted here given the early-node
 focus of this fixture set and the low expected yield relative to the time
-cost.
+cost. (One of the 36 -- `physiciansched3-3` -- was later recovered by a
+follow-up pass-1 retry that happened to finish just under its own 600s
+timeout; it still produced no RINS fixture at the 128-node/300s budget, so
+the final counts above are effectively unchanged: 349/385 root fixtures,
+223/385 RINS fixtures.)
+
+## ⚠️ Known bug: `--sweep`'s in-process grid can silently misreport some points
+
+Confirmed empirically (2026-09): running the same `(shallow, fixClose,
+nodes)` point via `--sweep` (48 points back-to-back in one process) can
+report a *different, strictly worse* result than an isolated single-point
+run (`./rins-bench <instance> --shallow=S --fix-close=F --nodes=N`, no
+`--sweep`) with **identical** options -- most visibly with `--method=vnd`,
+where grid points after the first for a given instance sometimes report
+`found=0` when a fresh, separate process for the exact same point reliably
+reports `found=1` with the correct objective. Root cause not found yet (Clp's
+`CoinThreadRandom`/`ClpModel` RNG is deterministically re-seeded to `1234567`
+at every `ClpSimplex` construction, so it is not the obvious suspect); some
+other state evidently leaks across successive `CbcModel`/`OsiSolverInterface`
+builds within one process. `rins-bench` now prints a warning to this effect
+before running `--sweep`. **Until this is root-caused, treat `--sweep`
+output as directional ranking only, and always re-confirm any promising
+cell with a separate one-shot invocation** -- this is exactly what the
+large-scale results below do (one process per grid point, not `--sweep`).
+
+## Large-scale parameter sweep results (same 223-instance RINS fixture set)
+
+One-shot (isolated-process-per-point) grid over `shallow x fixClose x nodes`
+for RINS (4x4x3 = 48 points/instance, 10704 total) and `nodes` alone for VND
+(shallow/fixClose are read by `CbcHeuristicVND::solution()` for reporting
+only -- confirmed by code inspection and by direct testing that VND's actual
+result is identical across all `--shallow` values -- so only `nodes` was
+swept: 3 points/instance, 669 total), `--sec=5` per point (bounds the
+worst case; a RINS/VND call that needs more than 5s to explore up to 1000
+sub-MIP nodes is not "early-node-friendly" regardless of what it might
+eventually find):
+
+**RINS**, found-rate and median relative improvement (`(incumbentObj -
+newObj) / |incumbentObj|`) by parameter combination, out of 223 instances:
+
+| shallow | fixClose | nodes | found | found-rate | median relImprove | avg time |
+|---|---|---|---|---|---|---|
+| 0 | *(any)* | 50   | 71 | 31.8% | 20.3% | ~0.4s |
+| 0 | *(any)* | 200  | 85 | 38.1% | 27.8% | ~0.6s |
+| 0 | *(any)* | 1000 | 85 | 38.1% | 35.1% | ~0.8s |
+| 1 or 3 | *(any)* | 50   | 68 | 30.5% | 26.2% | ~0.4s |
+| 1 or 3 | *(any)* | 200  | 82 | 36.8% | 30.9% | ~0.65s |
+| 1 or 3 | *(any)* | 1000 | 84 | 37.7% | 34.9% | ~0.8s |
+| 2 | *(any)* | any  | 0-2 | ~0% | n/a | trivial |
+
+Three clear, previously-unverified findings:
+
+- **`fixClose` (the close-fix fallback distance) has *zero* measurable
+  effect** on this instance set at this node budget -- found-rate and median
+  improvement are identical across `fixClose in {0.0, 0.2, 0.4, 0.6}` for
+  every `(shallow, nodes)` combination (only wall time varies slightly,
+  `fixClose=0` being marginally cheaper since it skips the fallback scan
+  entirely). The exact-agreement fixing pass alone already saturates what's
+  achievable here; the close-fix heuristic earns its keep on some other
+  instance/regime, not on this early-node RINS-fixture population.
+- **`shallow=0` (fix all agreeing columns, the CLI default) is the best or
+  tied-best choice at every node budget** -- modes 1/3 (fix only at original
+  lower bound) are a close second (fewer columns fixed -> occasionally a
+  slightly *larger* median improvement per found solution, e.g. 34.9% vs
+  35.1% at nodes=1000, but a consistently *lower* found-rate). **`shallow=2`
+  (fix only AWAY from original lower bound) is nearly useless on this set**
+  -- not a bug, just a direct consequence of most agreeing integer columns
+  in these MIPLIB-style instances already sitting at their original lower
+  bound (typically 0 for binaries), leaving almost nothing for mode 2 to fix.
+- **`nodes=200` already captures nearly all of the found-rate gain of
+  `nodes=1000`** (85/223 either way, for `shallow=0`) at roughly 25-30% less
+  time; the extra node budget mainly pays off in finding a *better* solution
+  when one is found (median relImprove 27.8% -> 35.1%), not in finding one
+  more often. For a strictly early-node/cheap-heuristic budget, `nodes=200,
+  shallow=0, fixClose=0` is the standout default -- as good a hit-rate as any
+  richer setting, at close to the lowest cost measured.
+
+**VND vs. RINS**, head-to-head at `nodes=200` (VND's `shallow` is a no-op;
+RINS at `shallow=0, fixClose=0`):
+
+| | found | of 223 |
+|---|---|---|
+| RINS | 85 | 38.1% |
+| VND | 72 | 32.3% |
+| both found | 72 | -- |
+| RINS-only | 13 | -- |
+| VND-only | **0** | -- |
+
+**VND is not a good replacement for RINS at early nodes on this set**: every
+single instance where VND found an improvement, RINS also found one (often
+the *same* objective value -- median improvement among double-successes is
+identical to 4 significant figures), and RINS additionally succeeds on 13
+instances VND misses entirely. VND's average time (534ms) is marginally
+lower than RINS's (603ms), but not by enough to offset strictly worse
+coverage. At `nodes=1000` VND's found-rate plateaus at 32.3% (no further
+gain over 200), confirming this isn't just a node-budget-starvation effect.
+
+**Bound-propagation headroom (`--probe-report`, default params, all 223
+fixtures)**: 93/223 instances (42%) show `CglProbing` fixing at least one
+*additional* integer column beyond RINS's own exact-agreement pass, before
+any sub-MIP solve happens. The gains are concentrated but occasionally
+huge -- `savsched1` (+990 columns, on top of RINS's own 215626/280152),
+`neos-3555904-turama` (+986/18762), `satellites2-40` (+935/32998),
+`neos-1445765` (+811, 38% of its 2143 integers -- the largest *relative*
+gain measured). Confirms, at full scale, the smaller earlier sample's
+finding that a probing-based propagation pass right after RINS's exact-match
+fixing (and before delegating to `smallBranchAndBound`) is worth
+prototyping for real on a meaningful fraction of instances -- still not
+wired into production code; see the `--probe-report` section below for the
+measurement methodology and its caveats.
 
 ## Replaying / sweeping -- `test/rins-bench`
 
