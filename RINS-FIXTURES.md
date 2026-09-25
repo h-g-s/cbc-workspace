@@ -64,13 +64,46 @@ present. Some instances are solved to proven optimality or infeasibility
 (by other heuristics, presolve, or a short tree) before that ever happens --
 an expected skip, not a failure.
 
-## Generating fixtures -- `gen-rins-fixtures`
+## Generating fixtures -- two tools, prefer the root-fixture-replay one
+
+**`gen-rins-fixtures-from-root` is the preferred tool whenever the target
+instance already has a root fixture** (`ROOT-FIXTURES.md`) -- it drives
+`test/mip-root-replay` (built with `-DCBC_DUMP_RINS_FIXTURE`) starting from
+the already-preprocessed problem + optimal root basis, instead of re-running
+preprocessing and the root LP relaxation from a raw `.mps.gz` every time.
+Confirmed empirically to reproduce byte-for-byte the same fixture/no-fixture
+outcome as the raw-CLI tool on every instance tested, at a large speedup
+(~4x on a medium instance; larger on instances whose root LP itself is slow) --
+because `mip-root-replay`'s `ReplayStrategy` installs cut generators and
+heuristics via the exact same `installCutGenerators()`/`doHeuristics()`
+production free functions the real `cbc` CLI calls, not a smaller default set.
+
+```sh
+cd Cbc/test
+./gen-rins-fixtures-from-root \
+  --root-fixture-dir=/path/to/rootFixtures \
+  --fixture-dir=/path/to/rinsFixtures        # every instance with a root fixture
+./gen-rins-fixtures-from-root --nodes=256 --sec=600 'bpc_*'   # wider budget, a subset
+```
+
+Options: `--jobs=N`, `--nodes=N` (default **128**), `--sec=N` (default **300**),
+`--root-fixture-dir=PATH`, `--fixture-dir=PATH`, `--prefix=PATH`,
+`--skip-build`, `--keep-bin`, `--no-color`. The **128-node / 300s default is a
+deliberate choice**, not just "as much budget as the fast replay affords": the
+goal of this fixture set is capturing RINS's/VND's behavior at *early/initial
+tree nodes*, not after deep search -- letting a run wander for hours to find
+its first incumbent late in a huge tree would capture a fixture unrepresentative
+of the "RINS fires early in the search" scenario this tool exists to study.
+
+**`gen-rins-fixtures` (the original, raw-`.mps.gz`-based tool) is the fallback**
+for instances that don't have a root fixture yet, or when experimenting
+without the root-fixture infrastructure at all:
 
 ```sh
 cd Cbc/test   # or use the ./gen-rins-fixtures symlink at the workspace root
-./gen-rins-fixtures                    # every instance, default 900s/200000-node budget
+./gen-rins-fixtures                    # every instance, default 7200s/unlimited-node budget
 ./gen-rins-fixtures 'bpc_*' 'cvrp_*'    # only instances matching these globs
-./gen-rins-fixtures --sec=1800          # more generous per-instance budget
+./gen-rins-fixtures --sec=1800 --nodes=128   # narrower, early-node-focused budget
 ```
 
 Same non-destructive pattern as `gen-root-fixtures`: fixture dumping only
@@ -81,9 +114,48 @@ the normal no-dump `cbc`. Each worker runs single-threaded (`-threads 1`) --
 
 Options mirror `gen-root-fixtures`: `--jobs=N`, `--sec=N`, `--fixture-dir=PATH`,
 `--data-dir=PATH`, `--prefix=PATH`, `--skip-build`, `--keep-bin`, `--no-color`.
-`--nodes=N` (default 200000) is RINS-specific: unlike the root fixture, a
-generous node backstop matters here since reaching *any* opportunity to fire
-with an incumbent present can require real tree search, not just the root LP.
+`--nodes=N` (default **0**, meaning the `-maxNodes` flag is omitted entirely --
+see the "`-maxNodes 0` gotcha" callout below) is RINS-specific: since finding
+*any* incumbent to compare against can require real tree search (not just the
+root LP), pass an explicit `--nodes` when the goal is specifically early-node
+behavior, matching `gen-rins-fixtures-from-root`'s 128-node default.
+
+> **`-maxNodes 0` is NOT "unlimited"** -- it is a special `CbcModel` case
+> (`CbcModel.cpp` around the `if (!getMaximumNodes())` check) that stops all
+> branching immediately after the root node (root heuristics, including RINS,
+> still run via `doHeuristicsAtRoot()` beforehand). `mip-sanity-data`'s own
+> convention -- node_limit=0 means *omit* `-maxNodes` from the command line
+> entirely, never pass literal `0` -- is what both scripts follow for "true
+> unlimited". Also confirmed empirically: whether cut generators are on or
+> off makes no measurable difference to whether RINS fires -- that is governed
+> purely by RINS's own internal node-count/`howOften_` gate
+> (`CbcHeuristicRINS.cpp`), not by cut presence.
+
+## Large-scale fixture collection results (`/home/haroldo/inst/miplib/2017+spp`, 385 instances)
+
+Run with `gen-rins-fixtures-from-root --nodes=128 --sec=300 --jobs=16`
+(early-node-focused budget, 16 physical cores) against that instance set's
+`rootFixtures/` (root fixtures generated separately via `gen-root-fixtures`,
+pass-1 600s/instance budget, `--jobs=16`):
+
+| stage | count | % of 385 |
+|---|---|---|
+| root fixture exists | 349 | 91% |
+| RINS fixture successfully dumped | 223 | 58% |
+| root fixture exists but no RINS fixture (expected skip -- see below) | 126 | 33% |
+| no root fixture at all (root LP/preprocessing too slow even at 600s) | 36 | 9% |
+
+The "expected skip" cases are genuinely expected, not failures: either RINS's
+periodic gate (`howOften_`, default every 100 nodes plus special windows)
+never opened within the 128-node/300s budget, or the instance was solved to
+proven optimality/infeasibility by other heuristics/presolve before that could
+happen. The 36 instances without any root fixture are, by construction, the
+hardest instances in the set -- their root LP relaxation and/or preprocessing
+alone exceeds a 600s (pass-1) budget; `ROOT-FIXTURES.md` documents that most
+(not all) of these can eventually be recovered with a much more generous
+`--pass2` (3h+ LP racing) budget, not attempted here given the early-node
+focus of this fixture set and the low expected yield relative to the time
+cost.
 
 ## Replaying / sweeping -- `test/rins-bench`
 
