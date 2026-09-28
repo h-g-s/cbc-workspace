@@ -67,6 +67,27 @@ Cbc/test/lp-tuning/
 - `doc/parallel_experiments_howto.md` — general GNU-parallel experiment
   patterns (worker/orchestrator script pairing, common pitfalls) used
   throughout this workspace's benchmarking tooling, not LP-tuning specific.
+- `doc/lp-method-auto-tuning.md` — **short blog-post write-up** (drafted for
+  publication, never posted) summarizing the whole ML effort end-to-end:
+  classification framing (predict fastest LP param from 207 `OsiFeatures`
+  structural features), model comparison (decision tree/Random Forest/
+  XGBoost/LightGBM/multi-output regression — Random Forest won, 1.33× k-fold
+  speedup, and is the only one whose `m2cgen`-generated C++ export was small
+  enough to embed), the win-profile Jaccard/Ward-clustering trick that
+  shrank 70 candidate params down to 12 well-separated classes (bumping the
+  speedup to 1.36×), the most predictive features (objective-coefficient
+  scale, covering-row fraction, density), and which instances benefit most
+  (large, very sparse, set-covering/packing problems — up to 50× on the LP
+  alone). **Note:** the described integration (`-lpMethod=auto`,
+  `CbcLpParamScorer.{hpp,cpp}`) was implemented in the `mipster` fork, not
+  upstream `Cbc` — treat the ML methodology as the reusable part, not the
+  described C++ integration point.
+- `doc/analyze_lp_tunning_parameters.md` — the task brief that drove the
+  k-fold methodology: how instances are split into 10 folds
+  (`~/inst/miplib/2017+spp/partitions/fold_NN.txt`, seed 42, round-robin, no
+  overlap), the train-on-9/validate-on-1 protocol, and the correctness/
+  timing-penalty convention (wrong or infeasible results penalized at 2×
+  the time limit so every outcome reduces to a single comparable time).
 
 ## Quick start (matching this workspace's conventions)
 
