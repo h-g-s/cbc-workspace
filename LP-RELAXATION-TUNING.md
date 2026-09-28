@@ -16,6 +16,7 @@ how-to.
 Cbc/test/lp-tuning/
 ├── run_lp_experiments.sh        orchestrator: instances × params × seeds, GNU parallel, resumable
 ├── run_one_lp.sh                worker invoked by the orchestrator (one job)
+├── monitor_lp_experiment.sh     live snapshot: progress, statuses, peak/current RSS of jobs
 ├── lp_params.txt                current parameter set in use (tag|cbc_params)
 ├── lp_params_orig.txt           original non-barrier set (dual/primal/idiot/sprint variants)
 ├── lp_params_extended.txt       extended set (superset used in later rounds)
@@ -105,6 +106,80 @@ Cbc/test/lp-tuning/run_lp_experiments.sh \
 
 Then follow `doc/lp_racing_analysis_howto.md` steps 2–4 (per-param analysis,
 racing/portfolio analysis, decision tree, PDF report).
+
+## Barrier round (Cholesky variants, memory-capped)
+
+The ML model behind `-lpMethod recommend` was trained on
+`lp_relax_2026_05_15_noblas`: 70 simplex configs and no barrier. Barrier
+*was* run earlier (`04_27`/`04_28`), but only on a `_noblas` build, with no
+memory control, and with barrier failures that did not show up in the
+results (see below). `lp_params_barrier.txt` holds the three variants to
+test: `-cholesky native` (the default), `dense` and `Uni`
+(UniversityOfFlorida = SuiteSparse CHOLMOD + AMD ordering).
+
+```sh
+EXP=~/experiments/cbc/lp_barrier_2026_09_28
+mkdir -p $EXP
+# same 380 instances the simplex round (and the ML model) used
+awk -F, 'NR>1 {print $1}' ~/experiments/cbc/lp_relax_2026_05_15_noblas/lp_results.csv \
+  | sort -u > $EXP/instances.txt
+nohup Cbc/test/lp-tuning/run_lp_experiments.sh \
+  --bin ~/prog/cbc/bin/cbc \
+  --params Cbc/test/lp-tuning/lp_params_barrier.txt \
+  --instance-list $EXP/instances.txt \
+  --timelimit 10800 --overtime 600 --seeds 1,2,3 \
+  --parallel 32 --mem-limit 12G --mem-method cgroup \
+  --common-args "-rowReductions force" \
+  --outdir $EXP > $EXP/nohup.log 2>&1 &
+
+Cbc/test/lp-tuning/monitor_lp_experiment.sh $EXP            # or: --watch 60
+echo 48 > $EXP/parallel_jobs   # change parallelism live (applied as jobs finish)
+```
+
+Points to keep in mind for this round:
+
+- **Same LP as the default `-solve` root.** `-initialSolve` runs the same
+  pre-root-LP strengthening as `-solve` (bound propagation, clique
+  strengthening, coefficient tightening) *except* row reductions. The LP-only
+  commands skip those to keep dual values. In a 40-instance sample, half the
+  instances lose rows in the real root (e.g. `gmut-76-50`: 5727 vs 6128 dual
+  iterations). `-rowReductions force` turns them on for `-initialSolve` too,
+  so the experiment solves exactly the LP the branch-and-bound root solves.
+  The `05_15` simplex data predates row reductions, so comparing it with
+  this round mixes slightly different LPs. If exact comparability matters,
+  rerun a few simplex anchor configs with the same `--common-args`.
+- **Memory.** `--mem-limit 12G` caps each job. `--mem-method cgroup` runs each
+  job in a `systemd-run --user --scope` with `MemoryMax`, no swap and
+  `OOMPolicy=continue` (only cbc is killed, and GNU `time` still reports its
+  peak RSS). These scopes die when your last login session ends, unless
+  lingering is enabled (`loginctl enable-linger $USER`). Without lingering,
+  `auto` falls back to `rlimit` (`prlimit --as`). That caps *address space*,
+  which is stricter than RSS, and cbc sees failed allocations instead of
+  being killed. OOM runs get status `MEMOUT`, and every row records
+  `max_rss_mb`.
+- **Threads.** The orchestrator exports `OPENBLAS_NUM_THREADS=1` and
+  `OMP_NUM_THREADS=1`. This build links OpenBLAS/CHOLMOD, and 32 jobs each
+  running a multi-threaded BLAS would oversubscribe the machine and distort
+  timings.
+- **Barrier fallbacks.** When the Cholesky factorization could not be set up
+  (factor too large or out of memory), Clp fell back to dual simplex without
+  saying so and reported `Optimal`, so the run looked like a barrier success.
+  Clp now prints `Barrier: Cholesky setup/factorization failed ... falling
+  back to dual simplex`, and the worker marks the row `barrier_fallback` in
+  the `notes` column. Before this fix, `-cholesky Uni` crashed (SIGSEGV)
+  whenever CHOLMOD's factor needed more than 2^31 nonzeros (32-bit indices),
+  and `-cholesky dense`/`Uni` aborted on a buffer overflow in the barrier log
+  handler. The April barrier results (including their `ERROR`s) are
+  therefore unreliable.
+- **Target instances.** In `05_15` no simplex config solved `a2864-99blp` or
+  `supportcase19` within 3h (`trdta5581` really is infeasible: bound
+  propagation proves it). In April, `barrier_native` solved `supportcase19`
+  in about 2400s.
+- Barrier does not check `-sec`, so a barrier timeout costs the full hard
+  limit (`timelimit + overtime`).
+
+CSV columns added for this round (appended, so older analysis scripts still
+work): `max_rss_mb` and `notes`.
 
 ## Raw historical experiment data
 
