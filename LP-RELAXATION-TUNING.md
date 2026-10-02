@@ -201,6 +201,9 @@ root LP without scaling when Clp reports unscaled infeasibilities; this does
 not enable unscaled cleanup at every branch-and-bound node.
 The LP deadline stays armed through racing and unscaled cleanup, so cleanup
 uses the remaining solve budget rather than starting an unlimited phase.
+For reported unscaled dual infeasibility, explicit cleanup also omits Clp's
+ordinary tolerance-only dual relaxation, so a residual several times the
+requested dual tolerance cannot be dismissed solely by that allowance.
 
 Small objective differences can still occur between solutions accepted at
 the configured feasibility tolerance. Before calling such a difference a
