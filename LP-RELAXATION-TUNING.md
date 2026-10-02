@@ -181,6 +181,33 @@ Points to keep in mind for this round:
 CSV columns added for this round (appended, so older analysis scripts still
 work): `max_rss_mb` and `notes`.
 
+## Checking numerical correctness
+
+Do not trust an `Optimal` log line alone. Run `-checkSolution` after
+`-initialSolve`; the checker independently recomputes unscaled primal
+feasibility and dual optimality. The analysis scripts classify a failed
+check (including `optimal=no` with `feasible=yes`) as a wrong result, not a
+successful solve.
+
+LP-only actions synchronize the numerical parameters just like `-solve`,
+including primal/dual tolerances, iteration/time limits and the random seed.
+Inspect `primal_tolerance` and `dual_tolerance` in the check report to confirm
+the requested settings were actually used.
+
+Clp's cleanup may switch from dual to primal or back again. A primal-feasible
+solution is not necessarily optimal after such a switch: cleanup must also
+finish against the original costs and bounds. Cbc additionally re-solves the
+root LP without scaling when Clp reports unscaled infeasibilities; this does
+not enable unscaled cleanup at every branch-and-bound node.
+The LP deadline stays armed through racing and unscaled cleanup, so cleanup
+uses the remaining solve budget rather than starting an unlimited phase.
+
+Small objective differences can still occur between solutions accepted at
+the configured feasibility tolerance. Before calling such a difference a
+wrong result, rerun both methods with a tighter `-primalTolerance` and inspect
+the checker's worst row/column violations. This is especially important when
+many tiny bound violations accumulate into a visible objective difference.
+
 ## Raw historical experiment data
 
 Past experiment output directories (`.sol`/`.bas`/`.log`/`.result` per job,
