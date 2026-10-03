@@ -271,6 +271,27 @@ automatically; `--no-final-bound-tests` skips it. Controlled repeated runs of
 `upms_n9_m2_lgset_cmax_s137` report `18.1237`, whereas the baseline's reported
 bounds fluctuate despite identical node and iteration counts.
 
+### Interrupted-search shutdown safety
+
+Custom `CbcEventHandler` subclasses do not need a `CbcBnBOutput` controller:
+end-of-search statistics are sent only when one is attached, while the
+`endSearch` callback still runs normally. Regression cases cover both
+configurations and verify that the callback is delivered once.
+
+On interrupted parallel searches, completed workers can still own a parent
+node and a newly created child that have not been merged into the shared tree.
+Shutdown retains these nodes before discarding worker state and returns them
+to the tree only after every worker has exited, so the existing depth-ordered
+cleanup releases their cuts and ancestor/basis
+references. Deleting only the parent previously leaked the child and its
+reference chain. The extended final-bound tests include one, two and four
+workers and deterministic parallel mode. Twenty isolated node-limited ASan
+runs leaked before the fix and none afterward; UBSan and real cut-generating
+MIPs stopped at a node limit also pass. A separate intermittent leak remains
+in completed parallel searches: it reproduced once in 100 additional isolated
+ASan runs both with and without the shutdown fix. That issue does not involve
+pending interrupted-worker nodes and is still under investigation.
+
 ## Raw historical experiment data
 
 Past experiment output directories (`.sol`/`.bas`/`.log`/`.result` per job,
