@@ -292,6 +292,17 @@ in completed parallel searches: it reproduced once in 100 additional isolated
 ASan runs both with and without the shutdown fix. That issue does not involve
 pending interrupted-worker nodes and is still under investigation.
 
+### Root-cut termination status
+
+Post-cut root heuristics now skip slack-row cleanup when cut generation has
+already fathomed the root or stopped inconclusively. Removing rows at that
+point invalidated Clp's termination status, causing a completed cutoff proof
+to look like an abandoned LP and be reported as a time limit. This affected
+optimal MIP starts and repeated C API solves after adding a row on every CI
+platform, even when the objective and bound were correct. The existing
+MIP-start and lazy-constraint tests also check the completed status and bound;
+genuine time/event/node stops remain covered by the final-bound tests.
+
 ## Raw historical experiment data
 
 Past experiment output directories (`.sol`/`.bas`/`.log`/`.result` per job,
