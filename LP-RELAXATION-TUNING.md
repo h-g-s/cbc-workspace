@@ -199,6 +199,14 @@ solution is not necessarily optimal after such a switch: cleanup must also
 finish against the original costs and bounds. Cbc additionally re-solves the
 root LP without scaling when Clp reports unscaled infeasibilities; this does
 not enable unscaled cleanup at every branch-and-bound node.
+For a root solve, Cbc also enables a per-solve unscaled postsolve recovery option:
+if the presolved optimum reports unscaled infeasibility and postsolve leaves
+dual residuals whose average floating-point roundoff scale exceeds the dual
+tolerance, recovery starts without scaling, rather than waiting until the
+whole initial solve returns. Ordinary postsolve residuals and final root
+cleanup retain their existing paths. The option belongs to the root's local
+`ClpSolve` configuration, including each racing configuration; it does not
+enable this recovery for subsequent node solves.
 The LP deadline stays armed through racing and unscaled cleanup, so cleanup
 uses the remaining solve budget rather than starting an unlimited phase.
 For reported unscaled dual infeasibility, explicit cleanup also omits Clp's
@@ -210,6 +218,40 @@ the configured feasibility tolerance. Before calling such a difference a
 wrong result, rerun both methods with a tighter `-primalTolerance` and inspect
 the checker's worst row/column violations. This is especially important when
 many tiny bound violations accumulate into a visible objective difference.
+
+### Irish-electricity: postsolve instability
+
+Matched seed-3 runs on `hal` isolate a scaling-sensitive failure: dual with
+either ordinary or positive-edge steepest-edge pricing stops without a valid
+solution at 900 seconds, whereas both scaling-off variants produce independently
+validated optima in approximately 495 and 423 seconds, respectively.
+`-scaling off` is a verified workaround for this instance, not a new default.
+
+Saved-state diagnostics locate the amplification in presolve's
+`forcing_constraint_action` reversals: the largest row multiplier grows from
+about `4.36e4` before postsolve to `2.67e37` afterwards. The presolved solution
+also has an unscaled primal residual around `9.15e-4` at a requested `1e-6`
+tolerance. Subsequent scaled recovery can exhaust the deadline before Cbc's
+root-only unscaled cleanup is reached. Starting unscaled recovery immediately
+after postsolve avoids that delay; it does not change the forcing-row
+transformations or discard the recovered primal solution.
+
+With this root-only policy, fresh ordinary dual, positive-edge dual and racing
+runs pass the independent primal/dual checks at `1e-6`. Verified postsolve-state
+replays also pass under AddressSanitizer and UndefinedBehaviorSanitizer, as do
+synthetic tests for severe versus ordinary residuals and
+iteration-limited recovery. Separate unit tests cover legacy-option isolation,
+copying and assignment. The full 500-instance MIP sanity comparison has
+500 valid results and 317 confirmed optima on both sides.
+
+Some limited-search gaps still vary between runs. Controlled reruns reproduce
+the flagged cases with the before-fix binary too. In particular, current Cbc
+refreshes its cached tree bound on a wall-clock-driven progress cadence:
+node-limited runs can report different final bounds despite identical search
+node and iteration counts. Time-budgeted heuristics can also change their
+incumbents under full-suite contention. These variations are not evidence of
+an LP correctness failure or a repeatable regression from this recovery policy;
+compare controlled runs before attributing a gap change to it.
 
 ## Raw historical experiment data
 
