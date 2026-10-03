@@ -439,15 +439,16 @@ mapped back cleanly); a cut is normalized to the pool's single-sided
 cuts unfiltered) before being scored. Cuts that lose the best-fitness contest
 are erased from the caller's `OsiCuts` collection; survivors keep their
 original `OsiRowCut` identity/metadata untouched. Gated the same way as
-`CglBKClique`'s own filter -- small models (`numCols < CBC_CUTPOOL_FILTER_MIN_COLS`,
+`CglBKClique`'s own filter -- small models (`numCols < cutFilterMinCols`,
 default 500) and small candidate counts
-(`< CBC_CUTPOOL_FILTER_MIN_CANDIDATES`, default 20) are exempt, since
+(`< cutFilterMinCandidates`, default 20) are exempt, since
 filtering only pays for itself with many candidates to choose among. An
 optional parallelism/orthogonality secondary filter
-(`CBC_CUTPOOL_FILTER_MAX_PARALLELISM`, default **0.7**) and an
-always-filter override (`CBC_CUTPOOL_FILTER_ALWAYS=1`, bypasses both gates,
-for A/B testing) round out the env-var surface -- same naming pattern as
-`CglBKClique`'s `CBC_CLIQUE_POOL_*` vars. Unlike `CglBKClique`'s own
+(`cutFilterMaxParallelism`, default **0.7**) and an
+always-filter override (`-cutFilterAlways on`, bypasses both gates,
+for A/B testing) round out the surface. These started as
+`CBC_CUTPOOL_FILTER_*` env vars, the same pattern as `CglBKClique`'s
+`CBC_CLIQUE_POOL_*` vars, and are now the cbc parameters named here. Unlike `CglBKClique`'s own
 clique-cut parallelism filter (disabled by default, since an earlier sweep
 found no net win there), `0.7` ships enabled by default here, since the
 sweep below found it the single best-performing variant for these four
@@ -564,7 +565,7 @@ offline dataset.
    `nz<=8000`) -- i.e. this zone is genuinely as cheap to reoptimize as
    the group already trusted to skip filtering.
 
-**Implementation**: added `CBC_CUTPOOL_FILTER_MIN_ELEMENTS` (default 0/off)
+**Implementation**: added `cutFilterMinElements` (default 0/off)
 to `cbcFilterGeneratedCuts()` (`Cbc/src/CbcCutPoolFilter.{hpp,cpp}`,
 `CbcCutGenerator.cpp` call site passing `solver->getNumElements()`);
 `smallModel` becomes `numCols < minCols || numElements <= minElements`.
@@ -606,10 +607,10 @@ single-run comparison's mixed result was branching noise, not a real
 effect in either direction.
 
 **Conclusion**: no benefit was demonstrated for extending the gate to
-`nz<=8000`, so `CBC_CUTPOOL_FILTER_MIN_ELEMENTS` **ships OFF (0)** --
+`nz<=8000`, so `cutFilterMinElements` **ships OFF (0)** --
 harmlessness isn't the question here (a 5-repeat-averaged run shows it's
 essentially free either way), but there's no measured upside to justify
-shipping the added gate/complexity as a new default. The env var and the
+shipping the added gate/complexity as a new default. The parameter and the
 `nz` feature/threshold derivation remain available for future revisiting
 (e.g. against a harder/larger instance set, or if a future generator shows
 a real `nz`-correlated cost). **Reusable takeaways for future
@@ -684,7 +685,7 @@ false read.
   despite bbTime dropping meaningfully (~0.6s faster). This is the
   opposite of the earlier section's "standout" `filter_reinvest200`
   result -- but that earlier config paired `-passCuts=200` with
-  `CBC_CUTPOOL_FILTER_ALWAYS=1` (filter forced on regardless of the small-
+  `-cutFilterAlways on` (filter forced on regardless of the small-
   model gates), so its gain came from filtering *far more* rounds than
   today's gated default touches, freeing up much more time to reinvest.
   `-passCuts` alone, without also loosening the filter gates, mostly just
@@ -725,8 +726,8 @@ better than either individual knob alone or the `par10` alternative
 (which trades away primal gain and adds much more bbTime for a bit more
 dual gain).
 
-**Shipped defaults updated**: `CBC_CUTPOOL_FILTER_MIN_CANDIDATES`
-**10** (was 20) and `CBC_CUTPOOL_FILTER_MAX_PARALLELISM` **0.9** (was
+**Shipped defaults updated**: `cutFilterMinCandidates`
+**10** (was 20) and `cutFilterMaxParallelism` **0.9** (was
 0.7) in `Cbc/src/CbcCutPoolFilter.cpp`. `MIN_COLS` (500) and
 `MIN_ELEMENTS` (0, off) are unchanged -- no sweep evidence justified
 moving either. Full sanity suite (`./test`) re-run after rebuilding with
