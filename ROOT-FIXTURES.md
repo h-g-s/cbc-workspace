@@ -448,7 +448,8 @@ optional parallelism/orthogonality secondary filter
 always-filter override (`-cutFilterAlways on`, bypasses both gates,
 for A/B testing) round out the surface. These started as
 `CBC_CUTPOOL_FILTER_*` env vars, the same pattern as `CglBKClique`'s
-`CBC_CLIQUE_POOL_*` vars, and are now the cbc parameters named here. Unlike `CglBKClique`'s own
+`CBC_CLIQUE_POOL_*` vars, and both are now cbc parameters: the ones named
+here, and `cliqueFilter*` for the clique generators. Unlike `CglBKClique`'s own
 clique-cut parallelism filter (disabled by default, since an earlier sweep
 found no net win there), `0.7` ships enabled by default here, since the
 sweep below found it the single best-performing variant for these four
