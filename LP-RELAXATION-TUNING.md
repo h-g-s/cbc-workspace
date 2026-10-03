@@ -245,13 +245,31 @@ copying and assignment. The full 500-instance MIP sanity comparison has
 500 valid results and 317 confirmed optima on both sides.
 
 Some limited-search gaps still vary between runs. Controlled reruns reproduce
-the flagged cases with the before-fix binary too. In particular, current Cbc
-refreshes its cached tree bound on a wall-clock-driven progress cadence:
-node-limited runs can report different final bounds despite identical search
-node and iteration counts. Time-budgeted heuristics can also change their
-incumbents under full-suite contention. These variations are not evidence of
-an LP correctness failure or a repeatable regression from this recovery policy;
-compare controlled runs before attributing a gap change to it.
+the flagged cases with the before-fix binary too. Before the final-bound fix
+described below, Cbc could report a stale, wall-clock-driven progress bound
+despite identical search node and iteration counts. Time-budgeted heuristics
+can also change their incumbents under full-suite contention. These variations
+are not evidence of an LP correctness failure or a repeatable regression from
+this recovery policy; compare controlled runs before attributing a gap change
+to it.
+
+### Final bounds after interrupted search
+
+Progress reporting still refreshes the cached tree bound on a wall-clock
+cadence, but interrupted search now refreshes it from the live frontier before
+cleanup destroys the nodes. Parallel searches include finished workers' pending
+parent and created nodes before worker shutdown discards them. The refresh
+retains a stronger previously certified bound, caps it at the incumbent, and
+keeps the last known bound when no frontier remains or a stopped subtree is
+unaccounted for. It does not change progress frequency or node selection.
+
+`Cbc/test/final-bound-test` uses an enumerated binary optimum and a recording
+tree to check minimization/maximization, serial/parallel search, zero-node
+limits, node/time/event termination and completed searches. `./test` runs it
+automatically; `--no-final-bound-tests` skips it. Controlled repeated runs of
+`upms_n7_m3_int_wct_s137` now report bound `201`, and
+`upms_n9_m2_lgset_cmax_s137` report `18.1237`, whereas the baseline's reported
+bounds fluctuate despite identical node and iteration counts.
 
 ## Raw historical experiment data
 
