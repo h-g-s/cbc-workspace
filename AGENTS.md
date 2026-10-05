@@ -633,6 +633,14 @@ generator-agnostic apart from its payload, and the existing 357 preprocessed
 instances plus 237 clique fixtures under `~/instances/miplib/2017+spp/` are
 reusable as-is.
 
+## Measuring and improving preprocessing
+
+`PREPROCESSING.md` covers `CglPreProcess`: `-preprocTimes on` (time per
+phase and per pass, with the LP objective after each pass), what the default
+path actually runs, how to measure a change (paired timing, output
+equivalence, root bound on the hard set), the traps that each produced a
+false result once, and the open experiments on the per-pass LP re-solve.
+
 ## Debugging invalid cuts, false infeasibility, and missing optimal solutions
 
 A distinct class of bug from ordinary crashes: a cut generator emits a row cut
