@@ -138,6 +138,19 @@ echo 48 > $EXP/parallel_jobs   # change parallelism live (applied as jobs finish
 
 Points to keep in mind for this round:
 
+- **No failure fallback in training experiments.** Build a dedicated binary
+  with `CLP_BARRIER_NO_FALLBACK` to stop immediately with a `CoinError` when
+  barrier returns status 4 (Cholesky setup/factorization failure), rather than
+  solving the job with dual simplex under a barrier label. The `cbc` driver
+  returns exit code 99 and the LP worker records `ERROR`. Normal builds retain
+  fallback; successful barrier crossover and postsolve cleanup are unchanged.
+  Use a fresh output directory when switching binaries:
+
+  ```sh
+  CXXFLAGS="-O3 -DNDEBUG -march=native -mtune=native -ffp-contract=off -DCLP_BARRIER_NO_FALLBACK" \
+    ./config --opt --lapack --amd --install --prefix="$HOME/prog/cbc-lp-strict"
+  ```
+
 - **Same LP as the default `-solve` root.** `-initialSolve` runs the same
   pre-root-LP strengthening as `-solve` (bound propagation, clique
   strengthening, coefficient tightening) *except* row reductions. The LP-only
