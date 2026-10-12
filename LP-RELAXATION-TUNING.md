@@ -194,6 +194,26 @@ Points to keep in mind for this round:
 CSV columns added for this round (appended, so older analysis scripts still
 work): `max_rss_mb` and `notes`.
 
+### Dualize result and TODO: auto-tune flags instead of multiplying configs
+
+Dualizing the LP for barrier (`-dualize 1`) cut the barrier_univ shifted
+geomean from 175s to 11s for rows/cols >= 1.5 (worse below 1), so
+`-dualize 3` now dualizes automatically for barrier when rows >= 1.5*cols
+(`CbcSolver::runSolveContinuous`). The same approach should be tried for
+other flags rather than adding configurations to the portfolio:
+
+- [ ] **Dualize for primal/dual simplex configs.** Run `-dualize 1` on the
+  current primal/dual settings and look for a simple rule (rows/cols,
+  size) as for barrier; make it automatic only if it wins consistently.
+- [ ] **Scaling.** Compare `-scaling` modes (off/equilibrium/geometric/
+  auto/dynamic) per method; look for a simple rule from instance features.
+- [ ] Build both into the default auto-tuning so every method runs with
+  them, then retrain the ML recommender and racing portfolio on top
+  (`Cbc/test/lp-tuning/ml/`), with fewer configs.
+- [ ] After the barrier rerun (`lp_barrier_autodz_2026_10_12`) finishes,
+  merge it with the 17 non-barrier configs of the strict experiment and
+  redo analysis, clustering and k-fold.
+
 ## Checking numerical correctness
 
 Do not trust an `Optimal` log line alone. Run `-checkSolution` after
