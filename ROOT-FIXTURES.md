@@ -137,6 +137,149 @@ explored, proven-optimal/infeasible, best possible bound, best solution value
 (if any) and gap, wall time for the branch-and-bound call, and (if
 `--data-dir`'s `bks.tsv` has an entry) the best-known objective for comparison.
 
+### Root-cut budget screening
+
+`mip-root-replay` and the production CLI now share
+`resolveRootCutSettings()` for `passCuts`, `minDrop`, the
+`cutPassSmall/Medium/Large` tiers and `sizeSmallRows/Cols/sizeLargeCols`
+thresholds. These settings can be overridden through `--param=NAME=VALUE`,
+including the numeric parameters' `auto` value. `--pass-cuts=N` overrides
+the resolved pass budget; `--min-drop-scale=X` scales the resolved drop.
+Negative pass budgets ignore minimum drop, but other termination conditions
+can still end cutting earlier.
+
+`rootCutDropPatience` defaults to 2 (1 restores the previous stopping
+behavior); `rootCutFilterScore` and `rootCutFilterScope` default to 1
+(global selection; scope 0 restores per-generator filters only). Values
+above 1 require that many consecutive rounds below `minDrop` before the
+root loop stops for insufficient progress; a round meeting the threshold
+resets the counter. Existing progress-history exceptions can still keep
+cutting. Empty and zero-LP-iteration rounds also get this retry allowance,
+so a temporarily dormant generator can fire again. This setting does not
+affect tree nodes, heuristic subproblems, negative pass budgets or
+nonpositive `minDrop`; it does not remove pass/time budgets or infeasibility
+termination. Use `--param=rootCutDropPatience=3` in replay, or
+`-rootCutDropPatience 3` on the CLI. At log level 2, `[root-drop]` records
+report each round's improvement, threshold and consecutive-miss counter.
+
+`rootCutFilterScore` selects an experimental score for the generic
+per-generator root filter: 0 retains legacy fitness, 1 uses scale-invariant
+efficacy (violation divided by coefficient L2 norm), and 2 divides efficacy
+by total nonzeros to penalize dense rows. Modes 1/2 keep the per-column
+winner contest and greedy parallelism filtering, with deterministic ties.
+They retain mandatory, ranged and equality rows and leave original cut
+coefficients/metadata unchanged. Tree/subproblem filtering and clique
+generators' internal filters remain unchanged. This is not a global
+cross-generator selector; compare scores at fixed parallelism and cut-length
+limits before changing either mechanism.
+
+Score modes 3/4 use efficacy/sparse efficacy respectively but omit the
+best-per-column contest, retaining candidates that may complement the
+column winners. Parallelism filtering still applies; at parallelism 1
+these modes retain all finite-score candidates. This ablation isolates
+the column contest from the score and angular filter.
+
+`rootCutFilterScope` selects the combined-round filter (default 1; full runs on 393 instances: avg cost 50.75 vs 51.44 for the old defaults): 0 retains
+per-generator selection, 1 replaces the generic root per-generator filter
+with one combined-round filter, and 2 applies both. Global modes require
+nonzero `rootCutFilterScore`. The existing eligibility gates and
+parallelism threshold apply to the combined candidate batch. Mandatory,
+branch, and must-call-again generator cuts are protected, and generator
+attribution is compacted with the surviving rows. Generator-internal
+clique filters remain unchanged; pool retention/reuse is not altered.
+Tree/subproblem selection stays unchanged. `[root-selection]` at log
+level 2 reports candidate and retained counts per round, overall and per
+generator (`name=kept/candidates`).
+
+Interpreting per-instance losses: replay root bounds are deterministic
+(three repeats identical, and `--seed` changes nothing at root), but the
+cut loop is chaotic. Moving `cutFilterMaxParallelism` from 0.900 to
+0.899/0.901 changes about 40 of ~280 completed roots in both directions,
+with 7-8 losses above 1% gap closed and a worst loss of 21.6%. Judge a
+selection change against that noise floor, not against zero losses. On
+the same screen, scope 1 with efficacy at 0.9 gave 53/14 gains/losses
+above 1% gap closed. A tested union of legacy per-generator and global
+survivors was worse (36/18 above 1%) and was removed.
+
+`rootCutReusePeriod` defaults to 0, preserving the existing fallback that
+rechecks removed root cuts only when generators produce nothing. Positive
+k additionally scans that collection on rounds divisible by k while new
+cuts are present. Candidates must exceed the existing violation tolerance,
+are ranked by violation/L2 norm, deduplicated against the current batch,
+and limited by `rootCutReuseMaxCuts` (default 20). These are previously
+applied, removed cuts, not rejected candidates; no new persistent pool
+is created. Root budgets and tree/subproblem behavior are unchanged.
+`[root-reuse]` at log level 2 reports pool, candidate and reactivation counts.
+
+`Cbc/test/root-cut-score-test.cpp` exercises positive-rescaling invariance,
+sparsity preference, mandatory/ranged-cut retention and eligibility gates.
+It can be built without an autotools regeneration:
+`g++ -std=c++11 -I Cbc/src Cbc/test/root-cut-score-test.cpp
+Cbc/src/CbcCutPoolFilter.cpp $(pkg-config --cflags --libs osi)
+-o /tmp/root-cut-score-test`, then run `/tmp/root-cut-score-test`.
+Set `PKG_CONFIG_PATH` to the workspace install prefix's `lib/pkgconfig`.
+
+`zeroHalfRootPeriod` defaults to 0 (unchanged adaptive scheduling).
+Positive k tries ZeroHalf on rounds 1, 1+k, 1+2k, replacing its adaptive
+backoff with a fixed cadence. Shutdown remains independent: combine
+`--param=zeroHalfRootPeriod=4 --param=cutSwitchOff=zeroHalf:0` to retain
+it after barren calls. Tree/subproblem scheduling is unchanged. Root
+termination may occur before the next scheduled call; cadence does not
+force extra rounds. At log level 2, `[root-cadence]` identifies actual calls.
+Sweep configurations `zerohalf_k1/k2/k4/k8` compare fixed cadence with
+shutdown disabled; `shutdown_zerohalf` retains adaptive backoff with
+shutdown disabled, separating these two effects.
+
+For cut-only experiments use `--no-heur --root-only --adaptive-skip`.
+The adaptive skip flag is explicit because it remains off by default in
+replay (unlike the CLI); `--no-adaptive-skip` disables it for an ablation.
+`--root-only` captures the solved LP at the `afterRootCuts` event and stops
+before branching, rather than inferring the root bound from the final
+search frontier. It emits `[root-settings]`, `[root-pass]`,
+`[root-generator]` and `[root-result]` records. A root interrupted by the
+time limit is marked `completed=0` and must not enter bound comparisons.
+Pass records at the `generatedCuts` event describe the LP *before* applying
+that round's cuts, with cumulative separation CPU time; they are not
+separate measurements of LP reoptimization wall time.
+
+The first-stage driver compares the baseline with positive and negative
+pass caps, minimum-drop scales, adaptive skipping, generator shutdown and
+patience 2/3/5. `half_patience3` combines patience 3 with half the baseline
+minimum drop, isolating whether accepting smaller gains adds value beyond
+tolerating temporary stalls:
+
+```sh
+python3 Cbc/test/root-cut-sweep-selftest.py /path/to/rootFixtures
+python3 Cbc/test/root-cut-sweep.py \
+  --fixture-dir=/path/to/rootFixtures --data-dir=/path/to/instances \
+  --out=/path/to/new-experiment --sample=70 --sec=30 --jobs="$(nproc)"
+```
+
+The output directory must be new. Each run retains its command settings,
+binary hash, raw log and structured result, plus a combined `results.tsv`.
+The deterministic sample includes known root regressions and spans the
+three size tiers. Supply `--instances=FILE` for a fixed population or
+`--sample=0` for all fixtures. Each worker has a configurable address-space
+cap (`--memory-gb`, default 2); resource failures remain explicit errors.
+Cold starts, incomplete roots and bounds contradicting a finite reference
+are reported separately from comparable completed roots.
+
+GNU parallel uses all available cores by default. These timings are only
+for screening: confirm finalists with isolated paired runs, then normal
+heuristics and full-solve regression comparisons before changing defaults.
+The driver does not change production settings.
+Use `--base-param=rootCutDropPatience=2` to keep patience 2 fixed for every
+configuration, including the baseline. The `cap_double` and `cap_large100`
+configurations raise positive tier budgets without changing the negative
+small-problem budget; `skip_delay` and `skip_short` test adaptive backoff,
+and `shutdown_zerohalf`/`shutdown_lift` disable shutdown for just that
+generator. These are experimental controls, not recommended defaults.
+Use `--configs=baseline,drop_half,drop_fifth --repeats=3 --jobs=1` with a
+fixed `--instances=FILE` for isolated confirmation. Paired timing ratios
+then use the median time per configuration/instance, and bound comparisons
+use the weakest observed completed bound across repeats. All repeats must
+be valid for an instance to enter that paired comparison.
+
 ## Workflow for a cut generator / heuristic experiment
 
 1. `./gen-root-fixtures` once (see above) to populate the fixture set.
