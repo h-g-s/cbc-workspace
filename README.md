@@ -53,6 +53,11 @@ hand-written AVX2 SIMD paths, select which optional dependencies to link
 static/shared/both library types. Run `./config --help` for the full list of
 flags, or just run `./config` with no arguments for the interactive wizard.
 
+For measured Nauty tradeoffs, see the
+[Nauty dependency benchmark report](docs/nauty-benchmark-2026-10-05.md):
+the October 2026 hal sweep supports keeping it optional, with strong benefits
+on some symmetric instances but no broad default-performance advantage.
+
 > ⚠️ **Every `config` profile builds from the same in-tree build directories**
 > (`Cbc/src/Makefile`, `Clp/src/Makefile`, etc.) — only the final *install*
 > destination is separated by `--prefix`. Running `./config --debug

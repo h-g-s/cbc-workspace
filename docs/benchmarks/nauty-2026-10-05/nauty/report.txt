@@ -1,0 +1,23 @@
+CBC full benchmark run
+Started:        Sun Oct  4 09:05:23 PM EDT 2026
+Binary:         /home/haroldo/prog/cbc/bin/cbc
+Threads:        1  (per instance)
+Parallel:       100  (concurrent instances)
+Timelimit:      18000s (overrides limits.tsv)
+Instances:      393  (from /home/haroldo/inst/miplib/2017+spp)
+Outdir:         /home/haroldo/experiments/cbc/git_10_03_nauty
+
+
+═══════════════════════════════════════════════════
+  Results: 109/393 solved/proved, 284 timed out, 0 mem-limited, 0 failed
+  68 instance(s) finished without ever finding a feasible solution (TIMEOUT/MEMLIMIT(no_sol) + failures)
+  Finished: Mon Oct  5 12:49:35 PM EDT 2026
+  Peak memory used:  197399 MB / 256752 MB (76.9%)
+  Peak at:           2026-10-05T06:30:29-04:00
+═══════════════════════════════════════════════════
+
+Per-instance logs: /home/haroldo/experiments/cbc/git_10_03_nauty/
+Summary TSV:       /home/haroldo/experiments/cbc/git_10_03_nauty/summary.tsv
+Solutions:         /home/haroldo/experiments/cbc/git_10_03_nauty/*.sol  (present when feasible solution found)
+GNU parallel log:  /home/haroldo/experiments/cbc/git_10_03_nauty/parallel.log
+Memory usage log:  /home/haroldo/experiments/cbc/git_10_03_nauty/memory_usage.tsv

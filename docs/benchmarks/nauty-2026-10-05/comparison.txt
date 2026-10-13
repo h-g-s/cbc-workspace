@@ -1,0 +1,39 @@
+=== --verify: input bookkeeping cross-check ===
+No inconsistencies found.
+
+=== compare_benchmarks: 2 experiment(s) ===
+  nauty: docs/benchmarks/nauty-2026-10-05/nauty  (summary.tsv, 393 instances)
+  nonauty: docs/benchmarks/nauty-2026-10-05/nonauty  (summary.tsv, 393 instances)
+  Weights file: /home/haroldo/dev/cbc-workspace/compare_benchmarks_weights.json
+
+=== Ranking (lower avg cost = better; weights: solved=0.0, no_sol=200.0, overtime=300.0, error=250.0, wrong=1000.0) ===
+   # label                 avg_cost  solved  to_sol  no_sol  over  err  wrong  avg_pgap  avg_dgap  wins
+  ─────────────────────────────────────────────────────────────────────────────────────────────────────
+   1 nauty                    51.11     109     216      68     0    0      0    29.47%    30.48%   372
+   2 nonauty                  51.19     113     211      69     0    0      0    29.19%    30.36%   376
+
+  Winner: nauty (avg cost 51.11 vs 51.19)
+
+=== Top 20 instances by cost spread across experiments ===
+  instance                                           nauty         nonauty
+  satellites2-60-fs                            100.00(TIM)     200.00(TIM)
+  trdHardCA4500-8                               43.60(TIM)       0.00(OPT)
+  neos-5093327-huahum                           62.20(TIM)      31.50(TIM)
+  ns1760995                                     61.60(TIM)      80.10(TIM)
+  neos-3024952-loue                            100.00(TIM)      88.80(TIM)
+  trdca23002                                    10.80(TIM)       0.00(OPT)
+  cod105                                        24.30(TIM)      33.60(TIM)
+  pk1                                           49.70(TIM)      44.70(TIM)
+  neos-787933                                   30.30(TIM)      25.90(TIM)
+  graph20-20-1rand                              62.00(TIM)      66.20(TIM)
+  neos5                                          3.90(TIM)       7.10(TIM)
+  cvs16r128-89                                  22.30(TIM)      19.20(TIM)
+  sp150x300d                                    13.20(TIM)      15.70(TIM)
+  supportcase33                                 32.10(TIM)      29.80(TIM)
+  supportcase18                                  3.80(TIM)       6.00(TIM)
+  neos-631710                                   17.40(TIM)      19.50(TIM)
+  neos-960392                                    2.10(TIM)       0.00(OPT)
+  neos-911970                                    2.00(TIM)       0.10(TIM)
+  trdta99                                        6.50(TIM)       4.80(TIM)
+  mcsched                                        3.20(TIM)       4.70(TIM)
+
