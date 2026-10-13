@@ -207,6 +207,27 @@ other flags rather than adding configurations to the portfolio:
   size) as for barrier; make it automatic only if it wins consistently.
 - [ ] **Scaling.** Compare `-scaling` modes (off/equilibrium/geometric/
   auto/dynamic) per method; look for a simple rule from instance features.
+  **What already exists for scaling** (read before changing anything):
+  Clp's default `-scaling automatic` (mode 3, `ClpPackedMatrix::scale`)
+  computes geometric scaling, then compares the resulting
+  smallest/largest-coefficient ratio against equilibrium and keeps
+  geometric only if its ratio is more than 2x better. It is a matrix-shape
+  heuristic, never a solve-time one, and scaling is skipped when the
+  coefficient range is small. Modes `dynamic` (4) and `rowsonly` (5) exist
+  and were never benchmarked here. The only scaling choice in the ML
+  portfolio is the `dual_pesteep_scaling_off` class
+  (`CbcLpParamScorer`/`parseLpParamTag`); in the strict experiment it beats
+  `dual_pesteep_pertv58` by >1.25x on 46/380 instances (22 by >2x) and loses
+  by >1.25x on 99, so it is a real per-instance decision. Features most
+  correlated with "off wins": share of singleton rows, bin-packing rows,
+  rows with <4 nonzeros.
+  Screening experiment: `lp_params_scaling.txt` (best dual x2, primal and
+  barrier_univ configs x {default, off, equilibrium, geometric, automatic,
+  dynamic, rowsonly}), 1 seed, 3600s, 64 parallel, 12 GB cap, results in
+  `~/experiments/cbc/lp_scaling_2026_10_13`. Next: per-method best mode,
+  oracle gain vs default, whether a cheap rule (matrix ranges from the
+  scaling pass, row-type features) predicts it, then replace the mode-3
+  heuristic accordingly.
 - [ ] Build both into the default auto-tuning so every method runs with
   them, then retrain the ML recommender and racing portfolio on top
   (`Cbc/test/lp-tuning/ml/`), with fewer configs.
