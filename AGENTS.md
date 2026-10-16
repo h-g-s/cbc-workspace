@@ -572,10 +572,14 @@ Tool: `Cbc/test/cbc_pdi.py` (`run`, `analyze`, `compare`, `plot`, `explain`,
   early stop (node limit) *holds its last gap* until `T`; a run longer than `T`
   is truncated. To compare runs with different limits, `analyze --sec <T>` all
   of them with the same `T` (`compare` warns when horizons differ).
-- **Event source:** `-progressCsv` is complete only with `-threads 0`; with
-  `-threads N≥1` tree events are missing from it, so `analyze --events auto`
-  (default) uses the timestamped log rows instead. Do not mix the two when
-  comparing.
+- **Event source:** `-progressCsv` is a consumer of `CbcEventHandler::progress`
+  (also what drives the C `Cbc_addProgrCallback`): fired, serialised on the base
+  model, on every incumbent, on a significant dual-bound change
+  (`-progressMinChange`) and as a `tick` heartbeat after ~1 s without either.
+  It is complete for any `-threads`. CSVs from binaries before this change are
+  thin with `-threads N≥1`, so `analyze --events auto` (default) still reads the
+  timestamped log for those; use `--events csv` to force the CSV. Do not mix
+  sources when comparing.
 - **Noise:** results under heavy parallelism are noisy (two identical controls
   differ by ≈0.0003 PDI; single instances can swing much more). Always run a
   control twice, and for small instance sets repeat with different
