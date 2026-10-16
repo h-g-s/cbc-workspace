@@ -549,6 +549,45 @@ buckets sum back to the raw CSV's own `time` column total and that
 manual inspection) ranks above `Gomory`. See `./stats-analysis --help` (or
 the module docstring) for the full option list.
 
+### Experiments on solver behaviour — primal-dual integral (PDI)
+
+**The preferred metric for judging a change is the PDI, to be MINIMIZED
+(lower is better).** Also track the **number of proven-optimal solves** (to be
+MAXIMIZED) and the number of instances with no solution; a change should lower
+the PDI without losing optimal solves.
+
+`PDI = (1/T) · ∫₀ᵀ gap(t) dt`, the average gap over the time horizon `T`
+(0 = optimal from the start, 2 = no incumbent the whole time). `gap(t)` is 2
+with no incumbent, 1 with an incumbent but no dual bound (or bounds of opposite
+sign), else `|p−d| / max(|p|,|d|)`; maximization is negated internally. It
+rewards finding good solutions *early* and proving bounds *early*, which final
+gap or solve time alone cannot. Figure: `Cbc/doc/pdi-explained.png` (made by
+`cbc_pdi.py explain`): top = incumbent/bound over time, bottom = `gap(t)` with
+the PDI area shaded.
+
+Tool: `Cbc/test/cbc_pdi.py` (`run`, `analyze`, `compare`, `plot`, `explain`,
+`credit`; see its docstring).
+
+- **Horizon:** a proven-optimal/infeasible run has gap 0 after it ends; an
+  early stop (node limit) *holds its last gap* until `T`; a run longer than `T`
+  is truncated. To compare runs with different limits, `analyze --sec <T>` all
+  of them with the same `T` (`compare` warns when horizons differ).
+- **Event source:** `-progressCsv` is complete only with `-threads 0`; with
+  `-threads N≥1` tree events are missing from it, so `analyze --events auto`
+  (default) uses the timestamped log rows instead. Do not mix the two when
+  comparing.
+- **Noise:** results under heavy parallelism are noisy (two identical controls
+  differ by ≈0.0003 PDI; single instances can swing much more). Always run a
+  control twice, and for small instance sets repeat with different
+  `-randomCbcSeed`/`-randomSeed` values and use the same seeds for all variants.
+  Do not trust per-class conclusions from classes with <~15 instances.
+- **Method:** freeze the binaries (copy `cbc`) so later rebuilds do not alter
+  running experiments; screen one-factor variants, combine winners, then
+  confirm on the full set. Tune by class hierarchy: most specific
+  `CbcProblemClassifier` class first, then broader. Keep every tuned value a
+  user-overridable parameter with an `auto` default. Long, highly parallel runs
+  belong on `hal`.
+
 ### Other projects
 
 Each of the other 4 projects has its own test suite (`make check` / `test/`
