@@ -573,9 +573,11 @@ Tool: `Cbc/test/cbc_pdi.py` (`run`, `analyze`, `compare`, `plot`, `explain`,
   is truncated. To compare runs with different limits, `analyze --sec <T>` all
   of them with the same `T` (`compare` warns when horizons differ).
 - **Event source:** `-progressCsv` is a consumer of `CbcEventHandler::progress`
-  (also what drives the C `Cbc_addProgrCallback`): fired, serialised on the base
+  (also what drives the C `Cbc_setProgressCallback`, which can ask Cbc to stop;
+  the old `Cbc_addProgrCallback` was removed): fired, serialised on the base
   model, on every incumbent, on a significant dual-bound change
-  (`-progressMinChange`) and as a `tick` heartbeat after ~1 s without either.
+  (`-progressMinChange`) and as a `tick` heartbeat after `-progressInterval`
+  seconds (default 1, 0 disables) without either.
   It is complete for any `-threads`. CSVs from binaries before this change are
   thin with `-threads N≥1`, so `analyze --events auto` (default) still reads the
   timestamped log for those; use `--events csv` to force the CSV. Do not mix
