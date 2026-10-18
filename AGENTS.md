@@ -686,6 +686,16 @@ path actually runs, how to measure a change (paired timing, output
 equivalence, root bound on the hard set), the traps that each produced a
 false result once, and the open experiments on the per-pass LP re-solve.
 
+## Set partitioning heuristic with slacks — SppGrasp
+
+`SPP-GRASP.md` covers `CbcHeuristicSppGrasp` (`-sppGrasp`, `-sppGraspTime`).
+It is a GRASP+LNS heuristic for set partitioning/packing models where every
+partitioning row has a slack column (rmp*, eil*, ds, irp, ivu06). It runs on
+the original model before preprocessing, because preprocessing destroys the
+structure. When it applies, it switches the feasibility pump off unless the
+user set `-feas`. The document also covers the offline tuning driver
+`Cbc/test/spp-grasp-bench`, the tuning results, and open problems (rmp18).
+
 ## Debugging invalid cuts, false infeasibility, and missing optimal solutions
 
 A distinct class of bug from ordinary crashes: a cut generator emits a row cut
