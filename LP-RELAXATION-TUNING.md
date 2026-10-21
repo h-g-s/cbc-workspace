@@ -235,6 +235,358 @@ other flags rather than adding configurations to the portfolio:
   merge it with the 17 non-barrier configs of the strict experiment and
   redo analysis, clustering and k-fold.
 
+## Barrier readiness for racing
+
+Native barrier cancellation is cooperative: the racing event handler checks
+the shared winner flag, and native Cholesky polls at ordering, symbolic,
+sparse-update, and dense-recursion boundaries. Interrupted factors must not
+be used for triangular solves or crossover. Time limits retain status 3;
+event cancellation retains status 5, rather than becoming a setup failure
+or triggering a simplex fallback.
+
+Barrier progress is delivered through `endOfBarrierIteration` with a
+`ClpInterior*` payload, not by pretending an interior model is a simplex.
+It feeds the same synchronized, rate-limited LP table as simplex racing
+participants; crossover is labeled `B+Cross`. Expected Cholesky setup
+exceptions are reported per participant, while unexpected worker exceptions
+are rethrown on the calling thread after workers are joined.
+
+The default racing portfolios remain unchanged pending real-race performance
+measurements. These checks do not impose a hard deadline on an individual
+allocation, external library call, or the optional Cilk dense kernel.
+
+`Clp/test/testBarrierControl` covers interrupted-model reuse, isolated wall/CPU
+limits, typed progress, barrier-winning/losing races, and winner recovery.
+It accepts an optional MPS path for a one-second wall/CPU/cancellation stress
+check, for example `satellites2-40.mps.gz` (run with BLAS threads set to one).
+
+The 2026-10-19 stopping sweep exercised one-second wall and CPU deadlines and
+an external cancellation after one second on 24 hard instances (72 checks,
+12 GB per process). All checks passed; every solve returned within 1.77 seconds
+of starting, with the longest being the CPU-deadline test on `trdcrooms`
+(wall time includes scheduling delays). On `satellites2-40`, native numerical
+factorization previously delayed either stop to roughly 51 seconds.
+Dense kernels poll cancellation at recursive tile boundaries but amortize
+clock reads over 64 calls: reading the CPU clock on every tile proved
+expensive. With CPU and wall deadlines both active, paired serial numerical
+factorizations took 49.51s before versus 50.15s after (two samples each).
+Full solves of `air04`, `co-100`, and `rmp14` retained identical objectives
+and iteration counts; these small timing samples are not a universal
+performance guarantee.
+The final build passed the Clp/OsiClp tests, all 122 existing racing checks,
+the barrier-control tests, and all 508 Cbc sanity instances plus auxiliary tests.
+Logs and before/after timing samples are under
+`~/experiments/cbc/native_cancellation_2026_10_19/`.
+
+### Actual concurrent racing pilot
+
+`~/experiments/cbc/racing_pilot_2026_10_19/` contains a reproducible,
+experiment-only binary and scripts comparing the current pair/triple defaults
+against native barrier + dual72, with idiot50 added for the new triple.
+The new triple uses perturbation 100 for idiot50, matching its isolated
+benchmark label; the current defaults retain perturbation 50 for primal methods.
+The binary overrides only a snapshot of the racing implementation, leaving
+installed defaults unchanged, and records winner completion separately from
+worker joins and total race-return time.
+
+The pilot selects 26 instances: strong isolated wins for each candidate method,
+high native-barrier memory consumers, and stopping/numerical stress cases.
+It runs all four portfolios with seeds 1/2/3 (312 runs), eight races at a time,
+with a 12 GB cap per whole race and single-threaded BLAS. It retains
+`-rowReductions force`, the 10800-second limit and 600-second hard-kill grace.
+`-timeMode elapsed` gives portfolios the same wall-clock budget rather than
+charging a triple more process CPU time than a pair.
+
+`results/lp_results.csv` is the live raw summary; `race_results.csv` adds winner,
+join-delay, and validation fields. `summary.txt` is refreshed every minute,
+using matched completed instance/seed blocks and separately excluding known
+objective-spread cases. `resources.csv` records available RAM and system load.
+These deliberately stratified results are a pilot, not a full-dataset ranking;
+keep them separate from the isolated-method database used for ML.
+
+The follow-up full comparison lives in
+`~/experiments/cbc/racing_full_2026_10_19/`: 403 instances, three seeds,
+current triple versus native triple (2418 fresh races, no pilot-result reuse).
+It uses the same snapshotted binary, preprocessing, memory, concurrency, and
+elapsed-time limits as the pilot. Its `summary.txt`, `race_results.csv`,
+`results/lp_results.csv`, and `resources.csv` follow the same conventions.
+The comparison completed with defaults unchanged: 1205/1209 validated terminal
+results for the current triple versus 1208/1209 for the native triple. The current
+triple timed out on all three `supportcase19` seeds; both triples had the same
+`rail01` seed-3 dual-optimality-check failure. Penalized shifted geometric means
+were 3.6167s and 3.4965s, respectively. Multi-minute loser joins remain a blocker.
+
+### Diagnosing multi-minute loser joins
+
+The 2026-10-20 debugger reproductions attribute the worst `bohle` and `kasavu`
+stalls to the shared **idiot50 participant**, not native factorization:
+`Idiot::IdiSolve` and its outer `Idiot::solve2` loop do not poll the racing
+event handler. On `bohle`, the native-barrier worker stopped 0.35s after the
+dual winner; only the idiot worker was still computing at the stack sample.
+The main thread was waiting in `pthread_join`, not a logging lock.
+
+An isolated prototype in `~/experiments/cbc/racing_delays_2026_10_20/` checks
+for cancellation/deadlines every eight minor iterations and at outer-loop
+boundaries, unwinds through existing array cleanup, and skips idiot crossover
+when stopped. Checking every minor iteration first cost about 5% in repeated
+`co-100` kernel-only measurements; sampling every eight reduced this to 0.80%
+(eight alternating pairs). The standalone one-second wall/CPU/event-stop checks
+on `bohle` and `kasavu` all returned within 1.51s of starting idiot work.
+
+Real-race seed-1 join delays with the sampled prototype were 2.41s for
+`bohle` native triple, 0.58s for `kasavu` native triple, and 0.42s for
+`bobin` native triple. Fresh debugger baselines for the first two were
+263.06s and 58.58s. The current triple's `bohle` delay fell from 277.60s
+to 8.37s; its remaining wait was the dual worker, not idiot50.
+All four prototype race solutions passed independent LP optimality checks.
+
+Uninterrupted full solves, run serially in alternating before/after order
+(two samples each), changed by -0.73% (`air04`), +0.26% (`co-100`), and
+-0.36% (`rmp14`), with identical objectives and iteration counts. These small
+samples are not a universal overhead guarantee. An unrestricted full primal
+run on `kasavu` was stopped during lengthy simplex cleanup; its bounded
+kernel-only timing and racing reproduction were used instead.
+
+The production integration uses a dedicated `idiotCheckpoint` event, preserves
+status 3 (limit) / 5 (event cancellation), and skips subsequent crossover,
+simplex startup, and postsolve cleanup solves after interruption. Existing
+scaling, objective/bound restoration, postsolve, and array cleanup still run.
+Do not return directly from an inner numerical loop or use thread cancellation.
+
+`Clp/test/testBarrierControl` also covers idiot interruption before/during
+crash, with presolve on/off, wall/CPU/iteration limits, positive postsolve
+cleanup requests after stopping, unchanged model bounds/objective/scaling,
+interrupted-model reuse, and a losing idiot racer. Its optional
+`<instance.mps.gz> --idiot` form stress-tests the presolved primal/idiot path.
+
+Integration evidence is under `~/experiments/cbc/idiot_integration_2026_10_20/`.
+The real before/after 508-instance sanity comparison found no regressions;
+Clp/OsiClp, all 122 existing racing checks, Cgl, and Cbc's auxiliary tests passed.
+All 36 races over six worst-delay instances (both triples, all three seeds)
+validated. The native triple's worst join decreased from 558.08s to 1.334s;
+the current triple still had a 54.73s outlier, not attributed by these traces.
+Eighteen presolved one-second wall/CPU/event stress checks returned within 3.35s.
+Serial full-solve timing samples changed by +1.13% (`air04`), -0.18%
+(`co-100`), and +0.19% (`rmp14`), with identical objectives and iteration counts.
+
+The fresh 2418-race follow-up is
+`~/experiments/cbc/racing_full_idiotstop_2026_10_20/`, using the same instance
+set, seeds, eight-race concurrency, 12 GB caps, and elapsed-time limits.
+It completed all 2418 races and retains the prior full experiment as its baseline
+in `before_after_summary.txt`. The current triple validated 1206/1209 results
+(two `supportcase19` timeouts and the known `rail01` seed-3 check failure);
+the native triple validated 1207/1209 (a new `a2864-99blp` seed-1 timeout
+and the same `rail01` failure). Penalized shifted geometric means fell from
+3.6167s to 2.8422s and from 3.4965s to 2.7533s, respectively, approximately
+21% in each case. Maximum joins were 82.38s and 26.52s; joins above 60s
+fell from eight per portfolio to one and zero. No new objective-spread
+instances appeared. Default portfolios remain unchanged.
+
+### Residual joins and sanitizer investigation
+
+The follow-up evidence is in
+`~/experiments/cbc/racing_sanitizers_2026_10_20/`. Experiment-only worker
+completion traces attribute a fresh `bohle` current-triple seed-2 delay to
+**sprint**: idiot stopped 0.94s after the dual winner, while sprint finished
+31.85s later. A separate debugger reproduction sampled the sprint worker
+continuing primal simplex pivots while the main thread waited in
+`pthread_join`; this is not a single long factorization call.
+An optimized-symbol build locates all three samples at `ClpSolve.cpp`'s
+final sprint `model2->primal(1)` cleanup. In standalone root solves,
+`ClpSimplexPrimal::pivotResult` only honors per-pivot `endOfIteration`
+cancellation when `inCbcBranchAndBound()` is true; otherwise the checked
+callback is at a factorization boundary. Its progress callback also calls
+`endOfIteration` but ignores the return value. Any fix must address that
+safe-point gap without changing the numerical behavior via unrelated
+branch-and-bound flags, and must preserve sprint restoration/cleanup.
+
+The `a2864-99blp` timeout had no race winner: all three workers reported
+time-limit status. Its seed-2 runs before and after the change reached the
+same final primal iteration/objective/residual sequence but at substantially
+different elapsed times (about 8302s versus 10603s to the winner). Seed 1
+previously needed about 10160s, already close to the 10800s budget. These
+observations motivate longer repeated before/after runs; they do not prove
+that the timeout is merely load variation or exclude a solver regression.
+
+The diagnostic plan snapshots all five projects, including current dirty
+sources, and builds a separate `-O1 -g -UNDEBUG` stack with combined
+AddressSanitizer and UndefinedBehaviorSanitizer, frame pointers, and
+`-ffp-contract=off`. The optimized installation is untouched. System libraries
+(including BLAS) are not instrumented. ASan leak detection is enabled and
+both sanitizers stop on the first error. ASan/UBSan do not detect data races;
+clean results would not establish race freedom or numerical determinism.
+
+The detached 14-race instrumented experiment covers the timeout, residual-join cases,
+and `rail01`, using 43200s limits (four times the original), four concurrent
+races, and a 12 GiB physical-memory cgroup per whole race, with no swap.
+Do not apply a virtual-address-space limit: ASan reserves a large shadow
+mapping. Four optimized `a2864-99blp` seed-1 repeats compare the pre-fix
+snapshot and current code with 21600s limits. These are diagnostic runs,
+not an uninterrupted-runtime benchmark. `summary.tsv`, per-case
+`result.json`/`solution.check`, sanitizer reports, and `progress.log`
+preserve both failures and independent LP validation.
+
+The initial combined-sanitizer barrier/idiot controls and all 122 racing
+checks passed. The actual `air04` native-triple smoke run then exposed a
+one-byte LeakSanitizer report at `ClpCholeskyBase::symbolic`: after
+`symbolic2` reports cancellation, the index-shrinking block still allocates
+`new CoinBigIndex[sizeIndex_]`, but skips assigning/freeing it because
+`noMemory` is already true. The fix gates the entire shrinking block on
+`!noMemory`; successful symbolic work is unchanged. This leak is not evidence
+of the hypothesized memory corruption or nondeterminism.
+
+`testBarrierControl` now sweeps every symbolic cancellation checkpoint on a
+small ordered matrix. Against the unchanged snapshot, it deterministically
+leaks two one-byte allocations; with the fix it passes ASan/UBSan and leak
+detection, as does the same real `air04` native race, with the same winner,
+worker iteration counts, and checked objective. The verified fix is in the
+working tree, not installed into the normal prefix. The ongoing long races
+retain their original immutable binary and may still report this known leak;
+their sanitizer output is not suppressed.
+
+Four additional optional real-LP idiot stress invocations hit their separate
+300s wrapper limits without flushed diagnostic output under instrumentation.
+They are inconclusive, not passing stop-latency measurements. The long-race
+plan uses much larger limits precisely because sanitizer overhead, including
+root preprocessing, is substantial.
+
+The long batch completed all 19 cases. Of 14 combined-sanitizer races,
+11 passed independent LP optimality validation without sanitizer reports;
+both `rail01` runs retained their known dual-optimality-check failure, and
+native `bohle` stopped on a UBSan signed-overflow report. None timed out.
+All four longer optimized `a2864-99blp` seed-1 repeats validated at objective
+`-282.960474309395`: before/after wall times were 5483.8/5488.7s and
+5846.9/5923.9s (approximately +0.09% and +1.32%). These controlled repeats
+do not reproduce the earlier timeout, but are not a proof of determinism.
+The nineteenth case is the previously completed optimized `bohle` diagnostic.
+The supervisor exits nonzero intentionally when any case has a sanitizer error.
+
+Native `bohle` overflowed `sizeFactor_` while counting its ordering graph:
+`2147354976 + 133188` at `ClpCholeskyBase::preOrder`. The old check tested
+for a negative sum only after signed overflow (already undefined behavior)
+and delayed the 4 GiB graph cap until counting completed. The fix checks
+the remaining capacity before each row's addition, retaining the existing
+index-size/memory limits and ordering-failure path, and releases scratch
+arrays on rejection or allocation failure. This changes oversized graphs'
+failure timing, not their allowed size.
+
+A seeded-count regression exercises the real counting code near both
+`INT_MAX` and the memory cap without allocating a huge graph. It reproduces
+UBSan on the old code and passes combined sanitizers with leak detection
+after the fix, alongside the existing barrier/idiot controls. The actual
+native `bohle` rerun uses the separate `cbc-sanitized-ordering-fixed` binary;
+its output is `bohle-ordering-fixed.log`/`.check`/`.exit`.
+It returned the independently validated optimum zero with a 2.42s join and
+no overflow report. However, LeakSanitizer then reported 57,757,922 bytes
+in 17 allocations: the explicit strict-barrier setup-failure exception
+bypassed `initialSolve`'s borrowed solution-array and presolve cleanup.
+The barrier failed safely at the graph cap; dual won the race.
+
+The strict failure is now deferred until normal model/presolve/temporary-array
+cleanup and solver-setting restoration have completed. Status 4 is retained,
+postsolve recovery solves are skipped, and the original `CoinError` is still
+thrown (both for explicit strict barrier options and the compile-time
+no-fallback flag). Failed barrier output no longer triggers optional variable
+fixing. Ordinary successful barrier and non-strict fallback paths are retained.
+
+The regression forces dense setup to reject a 40000-row sparse cyclic model
+at its existing factor-memory cap, with presolve on/off and a bounded reuse
+solve. Against the earlier snapshot it leaks 2,880,256 bytes in 12 allocations;
+with deferred failure it passes ASan/UBSan and leak detection. The optimized
+non-strict-build test also passes while requesting strict failure explicitly.
+The follow-up actual race is detached under `cbc-race-cleanup-fixed.scope`,
+with output `bohle-cleanup-fixed.log`/`.check`/`.exit`. It completed with exit
+zero and no ASan, UBSan, or LeakSanitizer reports. Dual won in 416 iterations
+at independently validated objective zero; the barrier reported status 4
+and its explicit setup-failure message, while idiot stopped with status 5.
+The join was 3.023s, total instrumented wall time 2106.6s including root
+preprocessing, and peak RSS approximately 5.07 GiB. All three fixes are now
+included in the normal installation. The original diagnostic batch is complete.
+
+### Publication verification (2026-10-21)
+
+Clp commit `5d224a70127819e32a92524c9c77f4609c46fe54` on upstream `next`
+contains the cooperative barrier/idiot changes and all three sanitizer
+fixes, including their regression tests and generated autotools wiring.
+The default LP portfolios are unchanged.
+
+After rebuilding/installing Clp and every downstream project, Clp/OsiClp,
+all 122 racing checks, the barrier/idiot controls, and Cgl's tests pass.
+The controls also pass the final production-linked ASan+UBSan build with
+leak detection enabled. The full Cbc suite passes 508/508 before and after,
+with 339 confirmed optima in both runs and no failures, errors, or overtimes.
+Cbc's auxiliary interface/callback/reduction/bound checks also pass; the
+optional `decomp2` root cut-purge fixture is unavailable and is skipped.
+Logs and result tables are under
+`~/experiments/cbc/lp_fix_verification_2026_10_21/`.
+
+The comparison script reports one wider final gap:
+`upms_n8_m3_int_wct_s42`, 1.4870% to 1.8657%, both stopping at 120s.
+Its common search trajectory is unchanged, but the deadline cuts off the
+new run 1610 nodes earlier. A matched-work rerun at 220000 nodes produces
+byte-identical saved solutions, objective 273, bound 270, 220003 enumerated
+nodes, and 493105 iterations in both binaries; wall times are 58.33/57.17s.
+The saved solution independently validates. This supports a deadline/load
+effect, not a repeatable algorithmic regression; the single paired timing
+does not establish a speedup. The other comparison outlier, `markshare1`,
+is a near-zero-bound gap-percentage artifact (`-9.09e-13` versus zero),
+not a meaningful improvement. Do not interpret that comparison's average
+gap as a performance metric.
+
+### Standalone simplex sanitizer campaign (2026-10-21)
+
+`~/experiments/cbc/simplex_sanitizers_2026_10_21/` contains a detached
+144-run ASan+UBSan campaign: 12 difficult instances, six configurations,
+and seeds 1/2. Four independent runs execute concurrently with GNU parallel.
+Each serial LP solve has a 43200s elapsed limit, a 45000s external timeout
+plus 30s kill grace, and a whole-process cgroup limited to 12 GiB physical
+memory with no swap. No virtual-address limit is imposed, since ASan needs
+its shadow address space. BLAS/OpenMP threads are limited to one.
+
+| Tag | Configuration |
+|---|---|
+| `dual72` | Dual simplex, perturbation 72 |
+| `dual_pesteep` | Dual simplex, positive-edge steepest pivoting |
+| `primal_plain` | Primal simplex, idiot and sprint explicitly disabled |
+| `primal_idiot50_pert50` | Primal simplex, 50 idiot passes, perturbation 50 |
+| `primal_idiot50_pert100` | Primal simplex, 50 idiot passes, perturbation 100 |
+| `primal_sprint30` | Primal simplex, 30 sprint passes, idiot disabled |
+
+Instances are `air04`, `neos-3402454-bohle`, `a2864-99blp`, `usafa`,
+`neos-5114902-kasavu`, `neos-2075418-temuka`, `savsched1`, `rail01`,
+`irish-electricity`, `co-100`, `rmp14`, and `square41`. The runs retain
+`-rowReductions force -initialSolve` to exercise the default root's fast
+preprocessing, not just Clp's own presolve. These are standalone methods,
+not races; this broadens algorithm coverage but does not exercise loser
+cancellation.
+
+The frozen `cbc-asan-ubsan` uses the production racing implementation, with
+no diagnostic portfolio overrides. `build.json`, `manifest.json`, patches,
+and `fixed-sources/` preserve build/source provenance; the unchanged
+instrumented objects and external-library limitations are inherited from
+the original sanitizer stack. Three fixed production translation units
+override the corresponding older archive members. The production-linked
+barrier/idiot controls pass combined sanitizers and leak detection. A
+memory-capped smoke solve also agrees with a separate optimized solve of
+the same root-preprocessed model.
+
+`summary.tsv` is refreshed every minute and includes pending/running cases.
+Per-case `command.json`, `run.log`, `result.json`, saved basis/solution,
+independent `solution.check`, and any `asan.*`/`ubsan.*` reports are under
+`results/`. `progress.log`, `supervisor.log`, `parallel.tsv`, and
+`resources.tsv` record dispatch and machine health. Completed cases are
+not overwritten on supervisor restart.
+
+A pass requires zero exit status, no sanitizer report, independent LP
+feasibility and optimality, and objective agreement within relative `1e-6`
+with at least one historical validated objective in the consolidated LP
+database. Historical objective-spread cases are therefore checked against
+an envelope, not treated as proof of determinism. Time limits, hard
+timeouts, checker failures, objective mismatches, process failures, and
+sanitizer failures remain explicit non-pass statuses. The known `rail01`
+checker failure is not waived. ASan/UBSan cannot establish data-race freedom,
+and instrumented runtimes must not be used as performance measurements.
+
 ## Checking numerical correctness
 
 Do not trust an `Optimal` log line alone. Run `-checkSolution` after
