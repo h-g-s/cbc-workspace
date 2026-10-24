@@ -235,6 +235,49 @@ other flags rather than adding configurations to the portfolio:
   merge it with the 17 non-barrier configs of the strict experiment and
   redo analysis, clustering and k-fold.
 
+## Production racing portfolio (2026-10-24)
+
+The three-worker default is native barrier (native Cholesky, with crossover),
+dual simplex with perturbation 72, and primal simplex with 50 idiot passes
+and perturbation 50. It replaces sprint in the old triple. The two-worker
+default remains dual72 + idiot50/pert50; the sequential ML policy is unchanged.
+`-lpMethod racing -threads 3` selects the triple explicitly; parallel `auto`
+also uses it with at least three threads. LP racing remains capped at three
+workers, including when branch-and-bound has more threads.
+
+The initial native candidate accidentally changed idiot perturbation to 100.
+Controlled three-seed comparisons on `ivu06-big` and `a2864-99blp` showed
+that restoring 50 removed those slowdowns. The full paired comparison in
+`~/experiments/cbc/racing_full_pert50_2026_10_23/` then completed 2,418 runs
+(403 instances, three seeds, two portfolios) with no candidate-only validation
+failures: 1,205 validated optima for native versus 1,202 for the old default.
+Native barrier solved all three `supportcase19` seeds that timed out without
+it. Penalized shifted geometric mean decreased from 4.081s to 3.970s (2.7%).
+
+The follow-up in `~/experiments/cbc/racing_full_quad_2026_10_23/` compared
+the old triple, native triple and native-plus-sprint four-worker portfolio
+using one frozen binary (3,627 runs). Validated counts were 1,202 / 1,205 /
+1,205; penalized shifted geometric means were 4.265s / 4.151s / 4.150s.
+The quad recovered sprint's wins on `triptim1` and `buildingenergy`, but
+improved the aggregate over native triple by only 0.04%, while using about
+32% more CPU. The native triple does not retain sprint's individual wins.
+The quad is not promoted, and no fourth LP worker is enabled in production.
+
+Both full comparisons used a 10,800s elapsed LP limit, 11,400s external
+timeout, 12 GiB total memory per race, identical forced root row reductions,
+and unchanged independent primal/dual checks. The SGM uses a 1s shift and a
+21,600s penalty for each unvalidated run. `rail01` seed 3 narrowly failed
+the dual-tolerance check in every portfolio; a separate HiGHS LP solve at
+1e-9 feasibility tolerances matched its objective to about 5e-9. All portfolios
+also reported `trdta5581` infeasible during preprocessing, before racing;
+these shared outcomes are not accepted as independently validated optima.
+Historical objectives or majority agreement do not replace feasibility checks.
+
+Cancellation and sanitizer fixes are already merged into upstream `master`.
+The experiments used an earlier frozen solver stack; source changes since
+that snapshot are covered separately by integration tests on current master,
+not by claiming that the old measurements benchmark the new stack exactly.
+
 ## Barrier readiness for racing
 
 Native barrier cancellation is cooperative: the racing event handler checks

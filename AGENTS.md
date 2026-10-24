@@ -30,32 +30,31 @@ personal forks). Each submodule tracks the **official `coin-or/<repo>` remote**.
 
 ## Branching Convention
 
-> ⚠️ **Always work on the `next` branch in every submodule, never on `master`/`stable`.**
+> ⚠️ **Work on `master` in every submodule; `next` has been merged into `master`.**
 
-Each of the five submodules has a `next` branch already created and pushed to the
-official upstream repo, and each submodule is checked out on `next` by default
-(`.gitmodules` pins `branch = next` for every entry, so
-`git submodule update --remote` tracks it automatically).
+The workspace repository itself uses `main`. Each of the five submodules tracks
+`master` on the official upstream repo (`.gitmodules` pins `branch = master`
+for every entry, so `git submodule update --remote` tracks it automatically).
 
 Before starting work in any submodule:
 ```sh
 cd <Project>
-git checkout next
-git pull origin next
+git checkout master
+git pull --ff-only origin master
 ```
 
-When your change is ready, push directly to `next` on the official repo (or open a
-PR against `next` if project policy requires review):
+When your change is ready, push directly to `master` on the official repo (or open a
+PR against `master` if project policy requires review):
 ```sh
 cd <Project>
-git push origin next
+git push origin master
 ```
 
-After updating a submodule's `next` branch, update the superproject's pointer too:
+After updating a submodule's `master` branch, update the superproject's pointer too:
 ```sh
 cd cbc-workspace
 git add <Project>
-git commit -m "Bump <Project> to latest next"
+git commit -m "Bump <Project> to latest master"
 ```
 
 ## Custom Autotools (COIN-OR BuildTools)
@@ -313,7 +312,7 @@ Cbc's main regression suite solves real MIP instances from the
 (365 instances across 16 problem families, each with a certified best-known/
 optimal objective in `bks.tsv` and suggested node/time limits in
 `limits.tsv`) and validates every saved solution. This suite is **entirely
-self-contained in the `Cbc` repository** (on `next`) — `mip-sanity-data` is
+self-contained in the `Cbc` repository** (on `master`) — `mip-sanity-data` is
 wired in as a submodule at `Cbc/test/mip-sanity-data`, and the orchestration
 script/validator live at `Cbc/test/run-mip-sanity-tests` /
 `Cbc/test/cbc_validate_sol.cpp` — so it works from a standalone `Cbc` clone,
@@ -797,7 +796,7 @@ on the single reproduction case or a subset of instances alone. See
 
 This workspace complements — but is independent from — `h-g-s/mipster`, a separate
 monorepo fork of Cbc (with CoinUtils/Clp/Cgl embedded and rebranded). Use
-`cbc-workspace` for upstream COIN-OR development on `next` branches; use `mipster`
+`cbc-workspace` for upstream COIN-OR development on `master` branches; use `mipster`
 for the divergent rebranded fork. Do not cross-apply MIPster-specific instructions
 (e.g. `CbcSolver` API refactor, removed GLPK/ASL support) to the upstream Cbc code
 here — they do not apply.
