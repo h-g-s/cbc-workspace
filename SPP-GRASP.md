@@ -18,6 +18,14 @@ artificial-slack applicability when that factor is positive and the model
 otherwise passes the structural checks. Those diagnostic runs are integration
 coverage, not a representative comparison of SppGrasp policies.
 
+At log level 1, the original-model run prints a compact `SPPGrasp` summary
+(first cost to best cost, or no feasible solution, plus elapsed time).
+The opening `SPPGrasp ...` text is flushed before the search starts;
+the result is appended on the same line when the search finishes.
+Root-node calls use the heuristic results table without individual
+`SppGrasp: first ...` / `SppGrasp: no feasible solution ...` diagnostics.
+Those detailed per-call messages remain available at log level 2 and above.
+
 > **PDI EVIDENCE STATUS — HISTORICAL RANKINGS WITHDRAWN (2026-10-21).**
 > Prior PDI means, paired deltas, confidence intervals, and
 > no-incumbent-by-horizon counts in this document are withdrawn and must not
