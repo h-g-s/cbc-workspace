@@ -1,20 +1,20 @@
 [submodule "CoinUtils"]
 	path = CoinUtils
 	url = https://github.com/coin-or/CoinUtils.git
-	branch = next
+	branch = master
 [submodule "Osi"]
 	path = Osi
 	url = https://github.com/coin-or/Osi.git
-	branch = next
+	branch = master
 [submodule "Clp"]
 	path = Clp
 	url = https://github.com/coin-or/Clp.git
-	branch = next
+	branch = master
 [submodule "Cgl"]
 	path = Cgl
 	url = https://github.com/coin-or/Cgl.git
-	branch = next
+	branch = master
 [submodule "Cbc"]
 	path = Cbc
 	url = https://github.com/coin-or/Cbc.git
-	branch = next
+	branch = master
