@@ -50,7 +50,7 @@
 #     --amd / --no-amd          SuiteSparse AMD ordering (Clp Cholesky) [default: on if found]
 #     --zlib / --no-zlib        .gz compressed MPS/LP I/O          [default: on if found]
 #     --bz2 / --no-bz2          .bz2 compressed MPS/LP I/O         [default: on if found]
-#     --nauty / --no-nauty      Graph automorphism (Cbc symmetry)  [default: on if found]
+#     --nauty / --no-nauty      Graph automorphism (Cbc symmetry)  [default: off]
 #
 #     Detection prefers Homebrew libraries when the selected compiler is
 #     itself a Homebrew compiler; otherwise system libraries are used.
@@ -128,7 +128,7 @@ OPT_LAPACK=-1
 OPT_AMD=-1
 OPT_ZLIB=-1
 OPT_BZ2=-1
-OPT_NAUTY=-1
+OPT_NAUTY=0
 
 OPT_LIB_TYPE="static"      # static | shared | both
 OPT_PREFIX=""              # auto-derived if empty
@@ -928,8 +928,8 @@ run_tui_plain() {
     [[ "$yn" == [Nn]* ]] && OPT_BZ2=0 || OPT_BZ2=1
   fi
   if (( NAUTY_AVAIL )); then
-    read -rp "  Enable Nauty (graph automorphism, Cbc symmetry cuts)? [Y/n]: " yn
-    [[ "$yn" == [Nn]* ]] && OPT_NAUTY=0 || OPT_NAUTY=1
+    read -rp "  Enable Nauty (graph automorphism, Cbc symmetry cuts)? [y/N]: " yn
+    [[ "$yn" == [Yy]* ]] && OPT_NAUTY=1 || OPT_NAUTY=0
   fi
 
   read -rp "  Library type [static/shared/both] (default: static): " yn
