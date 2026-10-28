@@ -1,5 +1,36 @@
 # SppGrasp — set partitioning/packing heuristic with slack columns
 
+## Current solver default (2026-10-28)
+
+`sppGrasp` defaults to **auto**: enable SppGrasp when the existing structural
+applicability checks accept the model, with **500 million work units per call**
+and **FPump retained** (`sppGraspFpump on`). `on` is an alias for this enabled
+mode; it does not force unsupported models through the applicability checks.
+Explicit `sppGraspWork`, `sppGraspFpump` and `feasibilityPump` settings take
+precedence. `-sppGrasp off` or `-heur off` disables the heuristic.
+This changes the solver defaults, not the standalone heuristic class defaults.
+
+This is the measured `-sppGrasp on -sppGraspWork 500 -sppGraspFpump on`
+candidate, not a new untested trigger. On all 47 SPP-dominant models with four
+matched seeds (564 validated solves across three arms), it lowered mean PDI
+by **29.85%** versus OFF and preserved every one of OFF's **104 optimal solves**.
+No-incumbent runs fell from 16 to 4; mean runtime rose from 839.42 to 839.85 s.
+Individual regressions remain, and the tuning-exposed collection is not an
+unseen-instance holdout. Historical defaults below describe earlier studies.
+
+The default change also passed a fresh before/after run of all **511**
+`mip-sanity-data` instances, using the suite's own time/node limits:
+511 validated passes and 345 confirmed optima in each run, no individual
+proof losses, and no regressions detected by `compare-results` (three
+final-gap improvements). This is a regression check, not another 1,800-second
+PDI experiment. Default/AUTO parity, explicit work/pump/off overrides,
+initial-LP/preprocessing timeouts and the installed binary's unqualified
+`rmp03 -threads 32 -solve` path were checked separately.
+
+- [Full report, plots, manifest and source patches](https://github.com/h-g-s/set-packing-partitioning-instances/tree/main/results/2026-10-28-sppgrasp-auto-confirmation)
+- [PDF and full raw evidence](https://github.com/h-g-s/set-packing-partitioning-instances/releases/tag/sppgrasp-auto-confirmation-2026-10-28)
+- [Forrest discussion and test results](https://github.com/coin-or/Cbc/commit/65e778e18abadcd13a84ad8a900969b08cbc2450#commitcomment-207118838)
+
 `CbcHeuristicSppGrasp` (`Cbc/src/CbcHeuristicSppGrasp.{hpp,cpp}`) targets pure
 set partitioning/packing models (binary columns, unit coefficients, rows
 `Σx = 1` or `Σx ≤ 1`) where **every partitioning row has a singleton "slack"
@@ -532,14 +563,14 @@ experiments.
   such as `−x6 + Σ others = 0`), so a run inside B&B alone is not enough.
 - If the preprocessed model still has the structure (rmp11, 16, 18), it also
   runs at the B&B root ('L' and 'C' hooks), starting from the incumbent.
-- The default `-sppGraspFpump auto` policy preserves the historical behavior:
+- The default `-sppGraspFpump on` retains FPump. Explicit
+  `-sppGraspFpump auto` restores the historical behavior:
   native singleton-slack SPP can switch off FPump unless the user explicitly
   set `-feas`; artificial-slack runs keep FPump enabled. FPump defaults are
   set with `setModeValAuto`, so `isUserSet()` means the user really set it.
 - Parameters:
-  - `-sppGrasp off|on|both|before` (default `on`).
-  - `-sppGraspWork` (default 1500, in millions of work units per call, about
-    1.5–3 s).
+  - `-sppGrasp off|auto|on|both|before` (default `auto`; `on` is an alias).
+  - `-sppGraspWork` (default 500, in millions of work units per call).
   - `-sppGraspNoImprove` (default 1000 LNS iterations without a new best).
   - `-sppGraspRealStallWork` (default 0, disabled): optional work-based stop
     after a real-feasible incumbent has stalled; see the adaptive-gate study
@@ -554,7 +585,7 @@ experiments.
     final-gap tradeoff. `-sppGraspRelatedRows` remains experimental (default
     0); a nonzero value activates connected-row selection only after a real
     artificial-free solution exists.
-  - `-sppGraspFpump auto|on|after`: `auto` keeps historical behavior; `on`
+  - `-sppGraspFpump auto|on|after` (default `on`): `auto` keeps historical behavior; `on`
     prevents automatic disabling; `after` disables FPump only after the
     original-model SppGrasp call returns a real-feasible improving solution.
     Explicit `-feas on|off` always takes precedence.
