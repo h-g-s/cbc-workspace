@@ -10,6 +10,15 @@ Explicit `sppGraspWork`, `sppGraspFpump` and `feasibilityPump` settings take
 precedence. `-sppGrasp off` or `-heur off` disables the heuristic.
 This changes the solver defaults, not the standalone heuristic class defaults.
 
+Use `-threads 3 -sppGraspThreads 0` to try three independent SppGrasp
+searches concurrently at root and keep the best real-feasible result.
+`sppGraspThreads` defaults to `1`; `0` uses the configured CBC thread
+count and positive values cap it. Parallel restarts do not change
+applicability, the deterministic native pre-LP certificate, or tree
+calls, and are not nested in other parallel heuristic batches.
+Each restart gets its own regular work limit; explicit total-work
+limits (including staged root passes) are split across the restarts.
+
 This is the measured `-sppGrasp on -sppGraspWork 500 -sppGraspFpump on`
 candidate, not a new untested trigger. On all 47 SPP-dominant models with four
 matched seeds (564 validated solves across three arms), it lowered mean PDI
