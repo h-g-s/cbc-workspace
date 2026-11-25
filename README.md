@@ -49,9 +49,10 @@ cd cbc-workspace
 
 `config` also lets you pick the target CPU architecture (`--arch=...`), toggle
 hand-written AVX2 SIMD paths, select which optional dependencies to link
-(LAPACK/OpenBLAS, AMD, zlib, bz2, Nauty — auto-detected, Homebrew-aware), and choose
+(LAPACK/OpenBLAS, AMD, zlib, bz2 — auto-detected, Homebrew-aware), and choose
 static/shared/both library types. Run `./config --help` for the full list of
 flags, or just run `./config` with no arguments for the interactive wizard.
+Nauty is detected but **disabled by default**; use `--nauty` to opt in explicitly.
 
 For measured Nauty tradeoffs, see the
 [Nauty dependency benchmark report](docs/nauty-benchmark-2026-10-05.md):
